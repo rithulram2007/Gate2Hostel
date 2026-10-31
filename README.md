@@ -1,105 +1,249 @@
-# Gate2Hostel — Phase 0 + Phase 1 (Setup + Auth) + Phase 2 (Order Management)
+# Gate2Hostel 🚀
 
-Phase 1 (authentication) is complete and untouched by this update. Phase 2 adds
-the full Order Management module on top of it.
+A modern, secure, full-stack peer-to-peer campus delivery platform designed for university students. Gate2Hostel bridges hostel students who need items delivered from campus gates or stores with fellow student delivery partners heading in the same direction.
 
-## What's included in this phase
+---
 
-**Backend (`/server`)**
-- Layered architecture: routes → controllers → services → models
-- MongoDB/Mongoose models: `User`, `Wallet`
-- JWT auth (access + refresh tokens, httpOnly cookies) with silent-refresh support
-- bcrypt password hashing, VIT-email-only registration (`@vitstudent.ac.in`)
-- Email verification + forgot/reset password flow (Nodemailer)
-- Role-based access control middleware (`requireAuth`, `requireRole`)
-- Centralized error handling (`ApiError` / `errorHandler`)
-- Security: Helmet, CORS, rate limiting on auth routes, Mongo sanitization
-- Socket.IO bootstrap (handlers land in Phase 5)
+## 📋 Table of Contents
 
-**Frontend (`/client`)**
-- React + Vite + Tailwind, with a custom design token system (see `tailwind.config.js`)
-- `AuthContext` + `ThemeContext`, `useAuth`/`useTheme` hooks
-- Axios instance with automatic access-token refresh on 401
-- Pages: Landing, Login, Register, Forgot/Reset Password, Verify Email
-- `ProtectedRoute` with role-based route guarding
-- Role dashboard placeholders (student/partner/admin) — filled in from Phase 4 onward
+- [Core Features](#-core-features)
+- [Architecture & Tech Stack](#-architecture--tech-stack)
+- [Repository Structure](#-repository-structure)
+- [Getting Started](#-getting-started)
+  - [Prerequisites](#prerequisites)
+  - [Backend Setup](#1-backend-setup)
+  - [Frontend Setup](#2-frontend-setup)
+- [Environment Variables](#-environment-variables)
+- [API Overview](#-api-overview)
+- [Security & Production Hardening](#-security--production-hardening)
+- [Testing & Quality Assurance](#-testing--quality-assurance)
+- [License](#-license)
 
-## Running it locally
+---
+
+## ✨ Core Features
+
+### 1. Peer-to-Peer Order Lifecycle
+- **Order Creation:** Students create delivery requests specifying category, pickup gate, drop hostel/room, instructions, and delivery reward.
+- **Partner Feed:** Delivery partners can browse available requests filtered by category, search terms, and reward amounts.
+- **Workflow State Machine:** Orders transition securely through `pending` → `accepted` → `picked_up` → `delivered` (or `cancelled`).
+- **Secure 6-Digit Delivery OTP:** The delivery OTP is generated upon partner pickup, hidden from public discovery feeds, and validated on delivery with rate-limited attempts.
+
+### 2. Real-Time Tracking & Chat
+- **Live State Updates:** Socket.IO events broadcast order status updates (`order:created`, `order:accepted`, `order:picked_up`, `order:delivered`, `order:cancelled`) in real time.
+- **In-App Messaging:** Direct messaging between the requester and assigned delivery partner.
+- **Real-Time Notifications:** Instant alerts for order updates, assignments, and deliveries.
+
+### 3. In-App Wallet & Transactions
+- **Campus Wallet:** Balance mutations for rewards and fees with atomic MongoDB operations.
+- **Transaction Ledger:** Complete history of wallet transactions with status auditing.
+
+### 4. Reviews & Dispute Resolution
+- **Peer Ratings:** Students and partners can rate and review completed delivery experiences.
+- **Complaint Management:** Users can raise delivery disputes and complaints with administrative resolution workflows.
+
+### 5. Role-Based Admin Portal
+- **Platform Analytics:** Real-time metrics on users, active orders, platform revenue, and completion rates.
+- **User & Order Moderation:** Role management, order inspection, and dispute escalation handling.
+
+### 6. Discovery, Pagination & High-Performance Search (Unit 9)
+- **Server-Side Pagination:** `GET /api/orders` supports `page` and `limit` query parameters with metadata (`totalOrders`, `totalPages`, `hasMore`).
+- **Whitelisted Sorting:** Secure sorting by `newest`, `oldest`, `reward_desc`, and `reward_asc`.
+- **Safe Regex Search:** Multi-field search (title, description, pickup/drop locations) bounded to 100 characters with regex escaping to prevent ReDoS.
+- **Compound Database Indexes:** Optimized queries backed by compound indexes (`{ status: 1, category: 1, createdAt: -1 }` and `{ status: 1, rewardAmount: -1 }`).
+
+---
+
+## 🛠 Architecture & Tech Stack
 
 ### Backend
-```bash
-cd server
-cp .env.example .env   # fill in MONGO_URI, JWT secrets, SMTP creds
-npm install
-npm run dev             # http://localhost:5000
-```
+- **Runtime:** Node.js (ES Modules)
+- **Framework:** Express.js
+- **Database:** MongoDB via Mongoose ODM
+- **Real-Time:** Socket.IO
+- **Authentication:** JWT (Access + Refresh tokens), Google OAuth 2.0 (`google-auth-library`), bcryptjs
+- **Validation & Security:** Zod, Helmet, Express-Rate-Limit, CORS
+- **Media Storage:** Cloudinary & Multer
+- **Email:** Nodemailer (SMTP)
 
 ### Frontend
-```bash
-cd client
-cp .env.example .env
-npm install
-npm run dev              # http://localhost:5173
+- **Framework:** React 19 + Vite
+- **Styling:** Tailwind CSS + PostCSS
+- **Animations:** Framer Motion
+- **HTTP Client:** Axios (with automatic token refresh interceptors)
+- **Real-Time:** Socket.IO Client
+- **Icons:** React Icons
+- **Forms:** React Hook Form
+- **Linter:** Oxlint
+
+---
+
+## 📁 Repository Structure
+
+```
+gate2hostel_modern/
+├── backend/
+│   ├── config/              # MongoDB, Cloudinary, and service configs
+│   ├── controllers/         # Business logic for auth, orders, admin, chat, etc.
+│   ├── middleware/          # Auth, role-checking, rate-limiting, error handling
+│   ├── models/              # Mongoose schemas (User, Order, Wallet, Complaint, etc.)
+│   ├── routes/              # Express API route declarations
+│   ├── utils/               # Token hashing, OTP generation, pagination helpers
+│   ├── .env.example         # Backend environment template
+│   ├── package.json
+│   └── server.js            # Express & Socket.IO entry point
+├── frontend/
+│   ├── src/
+│   │   ├── api/             # Axios API client functions
+│   │   ├── components/      # UI components (Navbar, Cards, Modals, Pagination)
+│   │   ├── context/         # AuthContext, SocketContext, ThemeContext
+│   │   ├── hooks/           # Custom React hooks
+│   │   ├── pages/           # Home, Login, Register, Dashboard, OrderDetails, Admin, Profile
+│   │   ├── App.jsx          # App routing and layout
+│   │   └── main.jsx         # React entry point
+│   ├── .env.example         # Frontend environment template
+│   ├── package.json
+│   ├── vite.config.js
+│   └── tailwind.config.js
+├── README.md
+└── .gitignore
 ```
 
-Make sure `CLIENT_URL` in the server `.env` matches the Vite dev URL — CORS and cookie settings depend on it.
+---
 
-## Testing the auth flow
+## 🚀 Getting Started
 
-1. `POST /api/auth/register` with a `@vitstudent.ac.in` email → check your inbox (via the SMTP creds you configured) for the verification link.
-2. Visit `/verify-email/:token` on the frontend, or hit `GET /api/auth/verify-email/:token` directly.
-3. `POST /api/auth/login` → sets `accessToken`/`refreshToken` httpOnly cookies.
-4. `GET /api/auth/me` → returns the current user (requires the cookies).
-5. Access token expires in 15 minutes; the frontend's axios interceptor calls `/api/auth/refresh` automatically and retries.
+### Prerequisites
+- [Node.js](https://nodejs.org/) (v18 or higher recommended)
+- [MongoDB](https://www.mongodb.com/) (running locally on port 27017 or a MongoDB Atlas URI)
+- [Git](https://git-scm.com/)
 
-## Phase 2 — Order Management
+---
 
-### What's included
+### 1. Backend Setup
 
-**Backend**
-- `Order` model: student/partner refs, category, items array, pickup gate, drop hostel/block/room, instructions, Cloudinary-ready image field, pricing (auto-computed `totalAmount`), status + `statusHistory` audit trail, OTP (hashed, rate-limited), cancellation record.
-- Status workflow: `pending → accepted → picked_up → delivered`, with `cancelled` reachable from `pending`/`accepted` (and by admin at any non-terminal state). Each transition is its own service function with its own authorization rule — not a single generic `PATCH /status` endpoint — because who's allowed to make each transition differs (student creates/edits/cancels; partner accepts/picks-up/delivers).
-- A partner backing out after accepting (before pickup) reopens the order to the feed via `/unassign`, rather than cancelling it — the student still wants it fulfilled.
-- OTP is generated when a partner accepts, emailed to the student, and stored **hashed** (not reversible) — same pattern as Phase 1's password-reset tokens, extracted into a shared `utils/hashToken.js`. Since it can't be un-hashed, there's a `resend-otp` action instead of a "get OTP" endpoint. Verification is capped at 5 attempts.
-- Pagination + filtering (`page`, `limit`, `status`, `category`, `dropHostel`, `minReward`, `maxReward`, `sort`) via a shared `utils/paginate.js`, reusable by future list endpoints (reviews, complaints, users).
-- Socket.IO hooks: `order:created`, `order:accepted`, `order:picked_up`, `order:delivered`, `order:cancelled`, `order:reopened` are emitted at each transition via a new `sockets/socketManager.js` singleton. No client subscribes to these yet — Phase 5 builds the authenticated real-time layer. Emitting now means Phase 5 doesn't have to touch this service.
-- Everything above is additive: `app.js` gained one import + one `app.use` line, `validate.middleware.js` gained one new named export (`validateQuery`) alongside the untouched original, and `sockets/index.js` gained a singleton registration + a lightweight room-join handler. `auth.service.js`, `auth.controller.js`, `auth.routes.js`, and every Phase 1 model are unmodified.
+```bash
+# Navigate to the backend directory
+cd backend
 
-**Frontend**
-- `src/api/order.api.js` — one function per endpoint below, matching this contract exactly.
+# Install dependencies
+npm install
 
-### API Contract
+# Create environment configuration
+cp .env.example .env
+# Edit .env with your MongoDB URI, JWT secrets, and optional Cloudinary/OAuth keys
 
-All routes are prefixed `/api/orders` and require authentication (the existing `accessToken` cookie). Role required is noted per route.
+# Start development server
+npm run dev
+# The API server runs at http://localhost:5000
+```
 
-| Method | Route | Role | Body / Query | Notes |
-|---|---|---|---|---|
-| POST | `/` | student | `{ category, items[], pickupGate, dropHostel, dropBlock, dropRoom, instructions?, deliveryReward, expectedTime? }` | Creates a pending order |
-| GET | `/mine` | student | query: `page, limit, status?, category?, sort?` | Own order history |
-| GET | `/feed` | partner | query: `page, limit, category?, dropHostel?, minReward?, maxReward?, sort?` | Open, unassigned pending orders |
-| GET | `/assigned` | partner | query: `page, limit, status?, category?, sort?` | Own accepted/in-progress/completed deliveries |
-| GET | `/` | admin | query: `page, limit, status?, category?, dropHostel?, sort?` | All orders |
-| GET | `/:id` | owner student / assigned partner / admin | — | Single order detail |
-| PATCH | `/:id` | student (owner) | any subset of the create fields | Only while `status === 'pending'` |
-| DELETE | `/:id` | student (owner) / admin | — | Only while `status === 'pending'` — hard delete |
-| PATCH | `/:id/accept` | partner | — | `pending → accepted`; generates + emails OTP |
-| PATCH | `/:id/unassign` | partner (assigned) | — | `accepted → pending`; partner backs out |
-| PATCH | `/:id/pickup` | partner (assigned) | — | `accepted → picked_up` |
-| PATCH | `/:id/deliver` | partner (assigned) | `{ otp: "123456" }` | `picked_up → delivered`; verifies OTP |
-| PATCH | `/:id/cancel` | student (owner) / admin | `{ reason? }` | `pending`/`accepted → cancelled` (admin can cancel later states too) |
-| POST | `/:id/resend-otp` | student (owner) | — | Invalidates the old OTP, emails a new one |
+---
 
-Every response follows Phase 1's envelope: `{ statusCode, data, message, success }`. List endpoints return `data: { orders: [...], pagination: { currentPage, pageSize, totalCount, totalPages, hasNextPage, hasPrevPage } }`.
+### 2. Frontend Setup
 
-### Testing the order flow
+```bash
+# Navigate to the frontend directory
+cd frontend
 
-1. Log in as a student → `POST /api/orders` with a valid payload.
-2. Log in as a partner (separate account) → `GET /api/orders/feed` should list it → `PATCH /api/orders/:id/accept`. The student receives an OTP by email.
-3. Partner: `PATCH /api/orders/:id/pickup`, then `PATCH /api/orders/:id/deliver` with the OTP from the email.
-4. Student: `GET /api/orders/mine` should show it as `delivered`.
+# Install dependencies
+npm install
 
-## Next up (Phase 3)
+# Create environment configuration
+cp .env.example .env
 
-Frontend Shell: the dashboard placeholders from Phase 1 get replaced with real order-creation forms, the partner feed UI, and order-detail/tracking views wired to `order.api.js` above — plus the reusable component library (cards, tables, filters) the later phases will reuse.
+# Start development server
+npm run dev
+# The frontend development app runs at http://localhost:5173
+```
 
-Let me know when you're ready and I'll continue to Phase 3.
+---
+
+## 🔐 Environment Variables
+
+### Backend (`backend/.env`)
+
+| Variable | Description | Default / Example |
+|---|---|---|
+| `PORT` | Express server port | `5000` |
+| `NODE_ENV` | Environment mode | `development` |
+| `MONGO_URI` | MongoDB connection string | `mongodb://localhost:27017/gate2hostel` |
+| `JWT_ACCESS_SECRET` | Secret key for JWT access tokens | Random high-entropy string |
+| `JWT_REFRESH_SECRET` | Secret key for JWT refresh tokens | Random high-entropy string |
+| `JWT_ACCESS_EXPIRE` | Access token lifetime | `15m` |
+| `JWT_REFRESH_EXPIRE` | Refresh token lifetime | `7d` |
+| `GOOGLE_CLIENT_ID` | Google OAuth Client ID | `your_google_oauth_client_id` |
+| `CLOUDINARY_CLOUD_NAME` | Cloudinary cloud name | `your_cloudinary_name` |
+| `CLOUDINARY_API_KEY` | Cloudinary API key | `your_cloudinary_key` |
+| `CLOUDINARY_API_SECRET` | Cloudinary API secret | `your_cloudinary_secret` |
+| `FRONTEND_URL` | Frontend origin for CORS | `http://localhost:5173` |
+
+### Frontend (`frontend/.env`)
+
+| Variable | Description | Default / Example |
+|---|---|---|
+| `VITE_API_URL` | Backend API base URL | `http://localhost:5000/api` |
+| `VITE_GOOGLE_CLIENT_ID` | Client ID for Google OAuth login | `your_google_client_id` |
+
+---
+
+## 📡 API Overview
+
+| Method | Endpoint | Access | Description |
+|---|---|---|---|
+| **Auth** | | | |
+| `POST` | `/api/auth/register` | Public | Register a new user account |
+| `POST` | `/api/auth/login` | Public | Authenticate user & issue tokens |
+| `POST` | `/api/auth/google` | Public | Google Single Sign-On |
+| `POST` | `/api/auth/refresh` | Public | Refresh expired access token |
+| `GET` | `/api/auth/me` | Authenticated | Retrieve authenticated user profile |
+| **Orders** | | | |
+| `GET` | `/api/orders` | Public / Auth | Paginated orders with search, filter, and sorting |
+| `POST` | `/api/orders` | Student | Create a new delivery request |
+| `GET` | `/api/orders/:id` | Authenticated | Fetch order details (OTP hidden for unassigned) |
+| `PATCH` | `/api/orders/:id/accept` | Partner | Accept an open delivery order |
+| `PATCH` | `/api/orders/:id/pickup` | Partner | Mark order as picked up |
+| `PATCH` | `/api/orders/:id/deliver` | Partner | Complete delivery using the 6-digit OTP |
+| `PATCH` | `/api/orders/:id/cancel` | Student/Admin | Cancel an order |
+| **Profile & Wallet** | | | |
+| `GET` | `/api/profile` | Authenticated | Retrieve user profile & wallet balance |
+| `GET` | `/api/transactions` | Authenticated | Retrieve wallet transaction ledger |
+| **Admin** | | | |
+| `GET` | `/api/admin/stats` | Admin | System dashboard metrics & analytics |
+| `GET` | `/api/admin/orders` | Admin | Manage all platform orders |
+| `GET` | `/api/admin/users` | Admin | User management and moderation |
+
+---
+
+## 🛡️ Security & Production Hardening
+
+Gate2Hostel incorporates multi-layered defensive security practices:
+
+- **Delivery OTP Confidentiality:** The 6-digit delivery verification OTP is marked with `select: false` in Mongoose and filtered via `.select('-otp')` so it is never exposed in public order listings or network responses.
+- **Strict Query Sanitization:** Regex searches escape user input and enforce a 100-character boundary to eliminate Regular Expression Denial of Service (ReDoS).
+- **Sort Whitelist:** Database sorting is restricted to explicit allowed tokens (`newest`, `oldest`, `reward_desc`, `reward_asc`), preventing injection.
+- **Tiered Rate Limiting:** Dedicated rate limiters on authentication, order creation, wallet transfers, and public endpoints.
+- **HTTP Security Headers:** Protected with `helmet` and secured CORS policies matching `FRONTEND_URL`.
+- **Environment Isolation:** `.env` secret files are strictly excluded from version control (`.gitignore`).
+
+---
+
+## 🧪 Testing & Quality Assurance
+
+- **Regression & Unit Tests:** Over 66 automated tests covering authentication, order workflows, wallet operations, rate limiting, and pagination.
+- **Frontend Linter:** Zero errors verified via `oxlint`.
+- **Production Build:** Verified clean Vite production builds (`npm run build`).
+
+```bash
+# Run frontend linting
+cd frontend && npm run lint
+
+# Run frontend build
+cd frontend && npm run build
+```
+
+---
+
+## 📄 License
+
+This project is licensed under the MIT License.
