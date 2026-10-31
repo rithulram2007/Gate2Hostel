@@ -28,6 +28,7 @@ const ReviewSchema = new mongoose.Schema({
   },
   comment: {
     type: String,
+    maxLength: [500, 'Review comment cannot exceed 500 characters'],
     default: ''
   },
   createdAt: {
@@ -38,6 +39,7 @@ const ReviewSchema = new mongoose.Schema({
 
 // Prevent duplicate reviews: one reviewer per order
 ReviewSchema.index({ order: 1, reviewer: 1 }, { unique: true });
+ReviewSchema.index({ reviewee: 1, createdAt: -1 });
 
 // Static method to recalculate user average rating after save
 ReviewSchema.statics.calculateAverageRating = async function (userId) {

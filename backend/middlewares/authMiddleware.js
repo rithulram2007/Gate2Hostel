@@ -17,7 +17,7 @@ export const protect = async (req, res, next) => {
     // Verify token
     const decoded = jwt.verify(
       token,
-      process.env.JWT_ACCESS_SECRET || 'local_access_secret_token_123456789_gate2hostel'
+      process.env.JWT_ACCESS_SECRET
     );
 
     const user = await User.findById(decoded.id);

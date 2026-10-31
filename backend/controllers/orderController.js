@@ -1,12 +1,13 @@
+import crypto from 'crypto';
 import Order from '../models/Order.js';
 import User from '../models/User.js';
 import Transaction from '../models/Transaction.js';
 import ApiError from '../utils/apiError.js';
 import cloudinary from 'cloudinary';
 
-// Helper to generate secure OTP
+// Helper to generate cryptographically secure 6-digit OTP
 const generateOTP = () => {
-  return Math.floor(100000 + Math.random() * 900000).toString();
+  return crypto.randomInt(100000, 1000000).toString();
 };
 
 // @desc    Create new order
@@ -15,17 +16,37 @@ const generateOTP = () => {
 export const createOrder = async (req, res, next) => {
   const { category, itemName, pickupLocation, dropHostel, rewardAmount, expectedTime, specialInstructions } = req.body;
 
-  try {
-    const student = await User.findById(req.user.id);
-    if (!student) {
-      return next(new ApiError('Student profile not found', 404));
-    }
+  // Strict input validation & boundaries
+  if (!itemName || typeof itemName !== 'string' || itemName.trim() === '') {
+    return next(new ApiError('Please specify the item name(s)', 400));
+  }
+  if (itemName.trim().length > 100) {
+    return next(new ApiError('Item name cannot exceed 100 characters', 400));
+  }
+  if (specialInstructions && typeof specialInstructions === 'string' && specialInstructions.trim().length > 500) {
+    return next(new ApiError('Special instructions cannot exceed 500 characters', 400));
+  }
 
-    // Verify wallet has enough funds for the reward
-    const requiredReward = Number(rewardAmount);
-    if (student.walletBalance < requiredReward) {
+  const requiredReward = Number(rewardAmount);
+  if (isNaN(requiredReward) || requiredReward < 10) {
+    return next(new ApiError('Reward amount must be at least ₹10', 400));
+  }
+
+  let escrowDeducted = false;
+  let createdOrder = null;
+
+  try {
+    // Atomic escrow deduction: only succeeds if balance >= requiredReward
+    const student = await User.findOneAndUpdate(
+      { _id: req.user.id, walletBalance: { $gte: requiredReward } },
+      { $inc: { walletBalance: -requiredReward } },
+      { new: true }
+    );
+
+    if (!student) {
       return next(new ApiError('Insufficient wallet balance. Please deposit funds first.', 400));
     }
+    escrowDeducted = true;
 
     // Handle image upload if present
     let attachmentImage = '';
@@ -53,22 +74,20 @@ export const createOrder = async (req, res, next) => {
 
     const otp = generateOTP();
 
-    // Deduct reward from student wallet
-    student.walletBalance -= requiredReward;
-    await student.save();
-
     // Create Order
-    const order = await Order.create({
+    createdOrder = await Order.create({
       student: req.user.id,
       category,
-      itemName,
+      itemName: itemName.trim(),
       pickupLocation,
       dropHostel,
       rewardAmount: requiredReward,
       expectedTime,
-      specialInstructions: specialInstructions || '',
+      specialInstructions: specialInstructions ? specialInstructions.trim() : '',
       attachmentImage,
       otp,
+      otpAttempts: 0,
+      otpSentAt: new Date(),
       status: 'pending'
     });
 
@@ -77,16 +96,16 @@ export const createOrder = async (req, res, next) => {
       user: req.user.id,
       amount: -requiredReward,
       type: 'reward_payment',
-      order: order._id,
+      order: createdOrder._id,
       status: 'success',
       description: 'Order Reward Escrow'
     });
 
     // Emit live order feed update to all online users
     req.io.emit('order_created', {
-      id: order._id,
+      id: createdOrder._id,
       category,
-      itemName,
+      itemName: createdOrder.itemName,
       pickupLocation,
       dropHostel,
       rewardAmount: requiredReward,
@@ -96,10 +115,17 @@ export const createOrder = async (req, res, next) => {
     res.status(201).json({
       success: true,
       message: 'Order created and reward locked successfully',
-      order
+      order: createdOrder
     });
 
   } catch (error) {
+    if (createdOrder) {
+      await Order.findByIdAndDelete(createdOrder._id).catch(() => {});
+    }
+    if (escrowDeducted) {
+      // Rollback escrow if order creation or transaction logging failed
+      await User.findByIdAndUpdate(req.user.id, { $inc: { walletBalance: requiredReward } });
+    }
     next(error);
   }
 };
@@ -114,17 +140,17 @@ export const getOrders = async (req, res, next) => {
     let query = {};
 
     // Filters
-    if (status) {
+    if (status && typeof status === 'string') {
       query.status = status;
     } else {
       query.status = 'pending'; // Default to active requests
     }
 
-    if (category) {
+    if (category && typeof category === 'string') {
       query.category = category;
     }
 
-    if (dropHostel) {
+    if (dropHostel && typeof dropHostel === 'string') {
       query.dropHostel = dropHostel;
     }
 
@@ -132,12 +158,15 @@ export const getOrders = async (req, res, next) => {
       query.rewardAmount = { $gte: Number(minReward) };
     }
 
-    // Search query on item names/pickup points
-    if (search) {
-      query.$or = [
-        { itemName: { $regex: search, $options: 'i' } },
-        { pickupLocation: { $regex: search, $options: 'i' } }
-      ];
+    // Search query on item names/pickup points with regex injection escaping
+    if (search && typeof search === 'string') {
+      const sanitizedSearch = search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      if (sanitizedSearch) {
+        query.$or = [
+          { itemName: { $regex: sanitizedSearch, $options: 'i' } },
+          { pickupLocation: { $regex: sanitizedSearch, $options: 'i' } }
+        ];
+      }
     }
 
     const orders = await Order.find(query)
@@ -238,9 +267,11 @@ export const acceptOrder = async (req, res, next) => {
 export const completeOrder = async (req, res, next) => {
   const { otp } = req.body;
 
-  if (!otp) {
+  if (!otp || (typeof otp !== 'string' && typeof otp !== 'number')) {
     return next(new ApiError('Verification OTP is required', 400));
   }
+
+  const cleanOtp = String(otp).trim();
 
   try {
     const order = await Order.findById(req.params.id);
@@ -253,25 +284,59 @@ export const completeOrder = async (req, res, next) => {
     }
 
     // Verify caller is the assigned partner
-    if (order.partner.toString() !== req.user.id) {
+    if (!order.partner || order.partner.toString() !== req.user.id) {
       return next(new ApiError('Only the assigned delivery partner can submit verification', 403));
     }
 
-    // Compare OTP
-    if (order.otp !== otp) {
-      return next(new ApiError('Invalid verification OTP. Delivery completion rejected.', 400));
+    // Check if OTP verification is locked due to excessive failed attempts
+    if (order.otpAttempts >= 5) {
+      return next(new ApiError('Verification locked: Maximum OTP attempts exceeded for this order', 400));
     }
 
-    // OTP matched! Change status
-    order.status = 'completed';
-    await order.save();
+    // Enforce strict 30-minute validity window
+    const OTP_EXPIRY_MS = 30 * 60 * 1000;
+    const otpAge = Date.now() - new Date(order.otpSentAt || order.createdAt).getTime();
+    if (otpAge > OTP_EXPIRY_MS) {
+      return next(new ApiError('Verification OTP has expired. Please contact support or order creator.', 400));
+    }
 
-    // Update Partner profile - add reward funds & update analytics
-    const partnerUser = await User.findById(req.user.id);
-    partnerUser.walletBalance += order.rewardAmount;
-    partnerUser.totalDeliveries += 1;
+    // Compare OTP
+    if (order.otp !== cleanOtp) {
+      order.otpAttempts = (order.otpAttempts || 0) + 1;
+      await order.save();
+      const remaining = Math.max(0, 5 - order.otpAttempts);
+      return next(new ApiError(
+        order.otpAttempts >= 5
+          ? 'Invalid verification OTP. Maximum attempts exceeded. Completion is locked.'
+          : `Invalid verification OTP. ${remaining} attempt(s) remaining.`,
+        400
+      ));
+    }
+
+    // OTP matched! Atomically transition order status
+    const completedOrder = await Order.findOneAndUpdate(
+      { _id: req.params.id, status: { $in: ['accepted', 'delivered_to_hostel'] } },
+      { $set: { status: 'completed', otpAttempts: 0 } },
+      { new: true }
+    );
+
+    if (!completedOrder) {
+      return next(new ApiError('Order cannot be completed in its current state or was already completed', 400));
+    }
+
+    // Atomic update to Partner profile - add reward funds & update deliveries
+    const partnerUser = await User.findByIdAndUpdate(
+      req.user.id,
+      {
+        $inc: {
+          walletBalance: completedOrder.rewardAmount,
+          totalDeliveries: 1
+        }
+      },
+      { new: true }
+    );
     
-    // Recalculate partner completion rate (in MERN, simple score updates)
+    // Recalculate partner completion rate
     const allAccepted = await Order.countDocuments({ partner: req.user.id });
     const allCompleted = await Order.countDocuments({ partner: req.user.id, status: 'completed' });
     partnerUser.completionRate = Math.round((allCompleted / allAccepted) * 100) || 100;
@@ -286,23 +351,23 @@ export const completeOrder = async (req, res, next) => {
     // Create reward transaction record for partner
     await Transaction.create({
       user: req.user.id,
-      amount: order.rewardAmount,
+      amount: completedOrder.rewardAmount,
       type: 'reward_received',
-      order: order._id,
+      order: completedOrder._id,
       status: 'success',
       description: 'Delivery Reward Received'
     });
 
     // Notify student via sockets
-    req.io.to(order._id.toString()).emit('order_status_change', {
-      orderId: order._id,
+    req.io.to(completedOrder._id.toString()).emit('order_status_change', {
+      orderId: completedOrder._id,
       status: 'completed'
     });
 
     res.status(200).json({
       success: true,
       message: 'Order verified and completed. Wallet payout completed.',
-      order
+      order: completedOrder
     });
 
   } catch (error) {
@@ -333,30 +398,35 @@ export const cancelOrder = async (req, res, next) => {
         return next(new ApiError('Only the student who placed the order can cancel it', 403));
       }
 
-      order.status = 'cancelled';
-      await order.save();
+      const cancelledOrder = await Order.findOneAndUpdate(
+        { _id: req.params.id, status: 'pending' },
+        { $set: { status: 'cancelled' } },
+        { new: true }
+      );
 
-      // Refund reward to student wallet
-      const studentUser = await User.findById(req.user.id);
-      studentUser.walletBalance += order.rewardAmount;
-      await studentUser.save();
+      if (!cancelledOrder) {
+        return next(new ApiError('Order cannot be cancelled in its current state', 400));
+      }
+
+      // Atomic refund reward to student wallet
+      await User.findByIdAndUpdate(req.user.id, { $inc: { walletBalance: cancelledOrder.rewardAmount } });
 
       // Log refund transaction
       await Transaction.create({
         user: req.user.id,
-        amount: order.rewardAmount,
+        amount: cancelledOrder.rewardAmount,
         type: 'deposit_refund',
-        order: order._id,
+        order: cancelledOrder._id,
         status: 'success',
         description: 'Order Reward Refund'
       });
 
-      req.io.emit('order_cancelled', { orderId: order._id });
+      req.io.emit('order_cancelled', { orderId: cancelledOrder._id });
 
       return res.status(200).json({
         success: true,
         message: 'Order cancelled. Reward refunded to wallet.',
-        order
+        order: cancelledOrder
       });
     }
 
@@ -364,9 +434,15 @@ export const cancelOrder = async (req, res, next) => {
     if (order.status === 'accepted') {
       if (isPartner) {
         // Revert to pending
-        order.partner = null;
-        order.status = 'pending';
-        await order.save();
+        const revertedOrder = await Order.findOneAndUpdate(
+          { _id: req.params.id, status: 'accepted' },
+          { $set: { status: 'pending', partner: null } },
+          { new: true }
+        );
+
+        if (!revertedOrder) {
+          return next(new ApiError('Order cannot be cancelled in its current state', 400));
+        }
 
         // Penalize partner completion score
         const partnerUser = await User.findById(req.user.id);
@@ -380,58 +456,63 @@ export const cancelOrder = async (req, res, next) => {
         }
         await partnerUser.save();
 
-        req.io.to(order._id.toString()).emit('order_status_change', {
-          orderId: order._id,
+        req.io.to(revertedOrder._id.toString()).emit('order_status_change', {
+          orderId: revertedOrder._id,
           status: 'pending'
         });
 
         // Broadcast to public feed that it is active again
         req.io.emit('order_created', {
-          id: order._id,
-          category: order.category,
-          itemName: order.itemName,
-          pickupLocation: order.pickupLocation,
-          dropHostel: order.dropHostel,
-          rewardAmount: order.rewardAmount,
-          expectedTime: order.expectedTime
+          id: revertedOrder._id,
+          category: revertedOrder.category,
+          itemName: revertedOrder.itemName,
+          pickupLocation: revertedOrder.pickupLocation,
+          dropHostel: revertedOrder.dropHostel,
+          rewardAmount: revertedOrder.rewardAmount,
+          expectedTime: revertedOrder.expectedTime
         });
 
         return res.status(200).json({
           success: true,
           message: 'Delivery cancelled. Request returned to public feed. Completion rating penalized.',
-          order
+          order: revertedOrder
         });
       }
 
       if (isStudent) {
         // Student cancels an already accepted order
-        order.status = 'cancelled';
-        await order.save();
+        const cancelledOrder = await Order.findOneAndUpdate(
+          { _id: req.params.id, status: 'accepted' },
+          { $set: { status: 'cancelled' } },
+          { new: true }
+        );
 
-        // Refund reward to student wallet
-        const studentUser = await User.findById(order.student);
-        studentUser.walletBalance += order.rewardAmount;
-        await studentUser.save();
+        if (!cancelledOrder) {
+          return next(new ApiError('Order cannot be cancelled in its current state', 400));
+        }
+
+        // Atomic refund reward to student wallet
+        await User.findByIdAndUpdate(cancelledOrder.student, { $inc: { walletBalance: cancelledOrder.rewardAmount } });
 
         // Log refund
         await Transaction.create({
-          user: order.student,
-          amount: order.rewardAmount,
+          user: cancelledOrder.student,
+          amount: cancelledOrder.rewardAmount,
           type: 'deposit_refund',
-          order: order._id,
+          order: cancelledOrder._id,
           status: 'success',
           description: 'Order Reward Refund'
         });
 
-        req.io.to(order._id.toString()).emit('order_status_change', {
-          orderId: order._id,
+        req.io.to(cancelledOrder._id.toString()).emit('order_status_change', {
+          orderId: cancelledOrder._id,
           status: 'cancelled'
         });
 
         return res.status(200).json({
           success: true,
           message: 'Accepted order cancelled. Reward refunded to student wallet.',
-          order
+          order: cancelledOrder
         });
       }
     }

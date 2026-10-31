@@ -43,8 +43,14 @@ export const sendChatMessage = async (req, res, next) => {
   const { orderId } = req.params;
   const { content } = req.body;
 
-  if (!content || content.trim() === '') {
-    return next(new ApiError('Content content cannot be blank', 400));
+  if (!content || typeof content !== 'string' || content.trim() === '') {
+    return next(new ApiError('Message content cannot be blank', 400));
+  }
+
+  const trimmedContent = content.trim();
+
+  if (trimmedContent.length > 1000) {
+    return next(new ApiError('Message content cannot exceed 1000 characters', 400));
   }
 
   try {
@@ -64,7 +70,7 @@ export const sendChatMessage = async (req, res, next) => {
     const message = await Message.create({
       order: orderId,
       sender: req.user.id,
-      content: content.trim()
+      content: trimmedContent
     });
 
     const populated = await Message.findById(message._id).populate('sender', 'name profilePhoto');

@@ -141,13 +141,15 @@ export const depositWallet = async (req, res, next) => {
   }
 
   try {
-    const user = await User.findById(req.user.id);
+    const user = await User.findByIdAndUpdate(
+      req.user.id,
+      { $inc: { walletBalance: normalizedAmount } },
+      { new: true }
+    );
+
     if (!user) {
       return next(new ApiError('User not found', 404));
     }
-
-    user.walletBalance = Math.round((user.walletBalance + normalizedAmount) * 100) / 100;
-    await user.save();
 
     // Log ledger transaction
     try {
@@ -160,8 +162,7 @@ export const depositWallet = async (req, res, next) => {
       });
     } catch (txErr) {
       // Rollback wallet balance if transaction logging fails to preserve consistency
-      user.walletBalance = Math.max(0, Math.round((user.walletBalance - normalizedAmount) * 100) / 100);
-      await user.save();
+      await User.findByIdAndUpdate(user._id, { $inc: { walletBalance: -normalizedAmount } });
       throw txErr;
     }
 
@@ -180,24 +181,27 @@ export const depositWallet = async (req, res, next) => {
 // @access  Private
 export const paySecurityDeposit = async (req, res, next) => {
   try {
-    const user = await User.findById(req.user.id);
+    const user = await User.findOneAndUpdate(
+      {
+        _id: req.user.id,
+        isVerifiedPartner: false,
+        walletBalance: { $gte: 500 }
+      },
+      {
+        $inc: { walletBalance: -500 },
+        $set: { isVerifiedPartner: true, securityDepositPaid: true }
+      },
+      { new: true }
+    );
+
     if (!user) {
-      return next(new ApiError('User not found', 404));
-    }
-
-    if (user.isVerifiedPartner) {
-      return next(new ApiError('You are already a Verified Partner', 400));
-    }
-
-    if (user.walletBalance < 500) {
+      const existing = await User.findById(req.user.id);
+      if (!existing) return next(new ApiError('User not found', 404));
+      if (existing.isVerifiedPartner) {
+        return next(new ApiError('You are already a Verified Partner', 400));
+      }
       return next(new ApiError('Insufficient wallet balance. You need ₹500 to pay the security deposit.', 400));
     }
-
-    // Process payment
-    user.walletBalance = Math.round((user.walletBalance - 500) * 100) / 100;
-    user.isVerifiedPartner = true;
-    user.securityDepositPaid = true;
-    await user.save();
 
     // Log transaction
     await Transaction.create({
@@ -223,20 +227,22 @@ export const paySecurityDeposit = async (req, res, next) => {
 // @access  Private
 export const refundSecurityDeposit = async (req, res, next) => {
   try {
-    const user = await User.findById(req.user.id);
-    if (!user) {
-      return next(new ApiError('User not found', 404));
-    }
+    const user = await User.findOneAndUpdate(
+      {
+        _id: req.user.id,
+        isVerifiedPartner: true,
+        securityDepositPaid: true
+      },
+      {
+        $inc: { walletBalance: 500 },
+        $set: { isVerifiedPartner: false, securityDepositPaid: false }
+      },
+      { new: true }
+    );
 
-    if (!user.isVerifiedPartner || !user.securityDepositPaid) {
+    if (!user) {
       return next(new ApiError('No security deposit found to refund', 400));
     }
-
-    // Process refund
-    user.walletBalance = Math.round((user.walletBalance + 500) * 100) / 100;
-    user.isVerifiedPartner = false;
-    user.securityDepositPaid = false;
-    await user.save();
 
     // Log transaction
     await Transaction.create({

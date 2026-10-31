@@ -19,7 +19,7 @@ import { MdOutlineDeliveryDining, MdOutlineCategory } from 'react-icons/md';
 const API_SOCKET_URL = import.meta.env.VITE_API_URL ? import.meta.env.VITE_API_URL.replace('/api', '') : 'http://localhost:5000';
 
 export const Dashboard = () => {
-  const { user, logout, updateUserInfo } = useAuth();
+  const { user, logout, updateUserInfo, accessToken } = useAuth();
   const { darkMode, toggleTheme } = useTheme();
   const axiosPrivate = useAxiosPrivate();
   const socketRef = useRef(null);
@@ -77,10 +77,13 @@ export const Dashboard = () => {
     fetchPersonalHistory();
     fetchPublicOrders();
 
-    // Establish WebSocket Connection
-    socketRef.current = io(API_SOCKET_URL, {
-      withCredentials: true
-    });
+    // Establish WebSocket Connection with authentication token
+    if (accessToken) {
+      socketRef.current = io(API_SOCKET_URL, {
+        withCredentials: true,
+        auth: { token: accessToken }
+      });
+    }
 
     socketRef.current.on('connect', () => {
       console.log('Socket.IO connected to dashboard');
@@ -120,7 +123,7 @@ export const Dashboard = () => {
         socketRef.current.disconnect();
       }
     };
-  }, []);
+  }, [accessToken]);
 
   // Watch room additions for active ongoing orders
   useEffect(() => {

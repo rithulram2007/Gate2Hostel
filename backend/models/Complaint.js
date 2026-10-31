@@ -36,5 +36,9 @@ const ComplaintSchema = new mongoose.Schema({
   }
 });
 
+// Indexes for admin filtering and user dispute lookups
+ComplaintSchema.index({ status: 1, createdAt: -1 });
+ComplaintSchema.index({ reportedUser: 1 });
+
 const Complaint = mongoose.model('Complaint', ComplaintSchema);
 export default Complaint;

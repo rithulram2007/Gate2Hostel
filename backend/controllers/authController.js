@@ -69,7 +69,7 @@ export const login = async (req, res, next) => {
   const { email, password } = req.body;
 
   // Validate email & password
-  if (!email || !password) {
+  if (!email || !password || typeof email !== 'string' || typeof password !== 'string') {
     return next(new ApiError('Please provide an email and password', 400));
   }
 
@@ -123,16 +123,22 @@ export const login = async (req, res, next) => {
 export const googleLogin = async (req, res, next) => {
   const { idToken } = req.body;
 
-  if (!idToken) {
+  if (!idToken || typeof idToken !== 'string' || idToken.trim() === '') {
     return next(new ApiError('Google ID Token is required', 400));
+  }
+
+  // Strictly reject arbitrary mock tokens in development and production
+  if (idToken.startsWith('mock_token_')) {
+    if (process.env.NODE_ENV !== 'test' || process.env.ALLOW_TEST_MOCKS !== 'true') {
+      return next(new ApiError('Invalid or unsupported Google ID Token', 401));
+    }
   }
 
   try {
     let payload;
     
-    // Support testing bypass or verify token using Google Library
-    if (idToken.startsWith('mock_token_')) {
-      // Mock validation for test requests
+    // Support testing bypass strictly when explicit test environment flag is set
+    if (process.env.NODE_ENV === 'test' && process.env.ALLOW_TEST_MOCKS === 'true' && idToken.startsWith('mock_token_')) {
       const mockEmail = idToken.replace('mock_token_', '') + '@vitstudent.ac.in';
       payload = {
         email: mockEmail,
@@ -143,7 +149,7 @@ export const googleLogin = async (req, res, next) => {
     } else {
       const ticket = await client.verifyIdToken({
         idToken,
-        audience: process.env.GOOGLE_CLIENT_ID || 'mock_client_id'
+        audience: process.env.GOOGLE_CLIENT_ID
       });
       payload = ticket.getPayload();
     }
@@ -224,7 +230,7 @@ export const refresh = async (req, res, next) => {
   try {
     const decoded = jwt.verify(
       refreshToken,
-      process.env.JWT_REFRESH_SECRET || 'local_refresh_secret_token_987654321_gate2hostel'
+      process.env.JWT_REFRESH_SECRET
     );
 
     const user = await User.findById(decoded.id);

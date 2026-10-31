@@ -6,10 +6,15 @@ import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
 import rateLimit from 'express-rate-limit';
 import dotenv from 'dotenv';
-
+import mongoose from 'mongoose';
 import jwt from 'jsonwebtoken';
+
+import validateEnv from './utils/validateEnv.js';
 import connectDB from './config/db.js';
 import errorHandler from './middlewares/errorMiddleware.js';
+import User from './models/User.js';
+import Order from './models/Order.js';
+
 import authRoutes from './routes/authRoutes.js';
 import profileRoutes from './routes/profileRoutes.js';
 import orderRoutes from './routes/orderRoutes.js';
@@ -19,8 +24,9 @@ import complaintRoutes from './routes/complaintRoutes.js';
 import adminRoutes from './routes/adminRoutes.js';
 import transactionRoutes from './routes/transactionRoutes.js';
 
-// Load Env variables
+// Load Env variables and validate critical secrets fail-fast
 dotenv.config();
+validateEnv();
 
 // Connect Database
 connectDB();
@@ -28,7 +34,10 @@ connectDB();
 const app = express();
 const server = http.createServer(app);
 
-// Socket.IO Setup
+// Reverse proxy compatibility (Nginx, Render, Cloudflare)
+app.set('trust proxy', 1);
+
+// Socket.IO Setup with restricted CORS
 const io = new Server(server, {
   cors: {
     origin: process.env.FRONTEND_URL || 'http://localhost:5173',
@@ -50,13 +59,36 @@ app.use(cors({
   credentials: true
 }));
 app.use(cookieParser());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '50kb' }));
+app.use(express.urlencoded({ extended: true, limit: '50kb' }));
 
-// Rate Limiter
+// NoSQL Query Injection Sanitizer
+const sanitizeNoSql = (obj) => {
+  if (obj && typeof obj === 'object') {
+    for (const key of Object.keys(obj)) {
+      if (key.startsWith('$') || key.includes('.')) {
+        delete obj[key];
+      } else {
+        sanitizeNoSql(obj[key]);
+      }
+    }
+  }
+  return obj;
+};
+
+app.use((req, res, next) => {
+  if (req.body) sanitizeNoSql(req.body);
+  if (req.params) sanitizeNoSql(req.params);
+  if (req.query) sanitizeNoSql(req.query);
+  next();
+});
+
+// Global Rate Limiter
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 200, // Limit each IP to 200 requests per windowMs for local testing
+  max: 300, // Limit each IP to 300 general requests per windowMs
+  standardHeaders: true,
+  legacyHeaders: false,
   message: {
     success: false,
     message: 'Too many requests from this IP, please try again after 15 minutes'
@@ -74,7 +106,7 @@ app.use('/api/complaints', complaintRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/transactions', transactionRoutes);
 
-// Basic Route / Health Check
+// Health Check
 app.get('/api/health', (req, res) => {
   res.status(200).json({
     success: true,
@@ -83,18 +115,30 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// Socket.IO Authentication Middleware
-io.use((socket, next) => {
+// Socket.IO Strict Authentication Middleware
+io.use(async (socket, next) => {
   try {
     const token = socket.handshake.auth?.token;
-    if (token) {
-      const decoded = jwt.verify(token, process.env.JWT_ACCESS_SECRET);
-      socket.userId = decoded.id;
+    if (!token) {
+      return next(new Error('Authentication error: Access token required'));
     }
+    const decoded = jwt.verify(token, process.env.JWT_ACCESS_SECRET);
+    const user = await User.findById(decoded.id).select('name role isBanned');
+    if (!user) {
+      return next(new Error('Authentication error: User not found'));
+    }
+    if (user.isBanned) {
+      return next(new Error('Authentication error: Account is banned'));
+    }
+    socket.userId = user._id.toString();
+    socket.user = {
+      id: user._id.toString(),
+      name: user.name,
+      role: user.role
+    };
     next();
   } catch (err) {
-    // Allow unauthenticated connections for public feeds, but tag them
-    next();
+    return next(new Error('Authentication error: Invalid or expired token'));
   }
 });
 
@@ -103,7 +147,7 @@ const onlineUsers = new Map();
 
 // Socket.IO Connection Handler
 io.on('connection', (socket) => {
-  console.log(`Socket connected: ${socket.id}${socket.userId ? ` (User: ${socket.userId})` : ''}`);
+  console.log(`Socket connected: ${socket.id} (User: ${socket.user.id} - ${socket.user.name})`);
 
   // Track authenticated users
   if (socket.userId) {
@@ -111,19 +155,44 @@ io.on('connection', (socket) => {
     io.emit('online_count', onlineUsers.size);
   }
 
-  socket.on('join_room', (roomId) => {
-    socket.join(roomId);
-    console.log(`User ${socket.id} joined room ${roomId}`);
+  // Room authorization check before joining
+  socket.on('join_room', async (roomId) => {
+    try {
+      if (!roomId || !mongoose.Types.ObjectId.isValid(roomId)) {
+        socket.emit('room_error', { message: 'Invalid order room identifier' });
+        return;
+      }
+
+      const order = await Order.findById(roomId).select('student partner');
+      if (!order) {
+        socket.emit('room_error', { message: 'Order room does not exist' });
+        return;
+      }
+
+      const isStudent = order.student.toString() === socket.user.id;
+      const isPartner = order.partner && order.partner.toString() === socket.user.id;
+      const isAdmin = socket.user.role === 'admin';
+
+      if (!isStudent && !isPartner && !isAdmin) {
+        socket.emit('room_error', { message: 'Unauthorized: You are not a participant of this order room' });
+        return;
+      }
+
+      socket.join(roomId);
+      console.log(`User ${socket.user.id} (${socket.user.name}) authorized and joined room ${roomId}`);
+    } catch (error) {
+      socket.emit('room_error', { message: 'Failed to authorize and join room' });
+    }
   });
 
   socket.on('leave_room', (roomId) => {
     socket.leave(roomId);
-    console.log(`User ${socket.id} left room ${roomId}`);
+    console.log(`User ${socket.user.id} left room ${roomId}`);
   });
 
-  // Typing indicators for chat rooms
-  socket.on('typing_start', ({ roomId, userName }) => {
-    socket.to(roomId).emit('user_typing', { userName });
+  // Typing indicators for chat rooms using verified authenticated socket identity
+  socket.on('typing_start', ({ roomId }) => {
+    socket.to(roomId).emit('user_typing', { userName: socket.user.name });
   });
 
   socket.on('typing_stop', ({ roomId }) => {

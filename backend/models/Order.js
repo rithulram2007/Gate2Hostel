@@ -18,7 +18,8 @@ const OrderSchema = new mongoose.Schema({
   },
   itemName: {
     type: String,
-    required: [true, 'Please specify the item name(s)']
+    required: [true, 'Please specify the item name(s)'],
+    maxLength: [100, 'Item name cannot exceed 100 characters']
   },
   pickupLocation: {
     type: String,
@@ -39,6 +40,7 @@ const OrderSchema = new mongoose.Schema({
   },
   specialInstructions: {
     type: String,
+    maxLength: [500, 'Special instructions cannot exceed 500 characters'],
     default: ''
   },
   attachmentImage: {
@@ -53,6 +55,10 @@ const OrderSchema = new mongoose.Schema({
   otp: {
     type: String,
     required: true // Store secure OTP code
+  },
+  otpAttempts: {
+    type: Number,
+    default: 0
   },
   otpSentAt: {
     type: Date,
@@ -73,6 +79,11 @@ OrderSchema.pre('save', function (next) {
   this.updatedAt = Date.now();
   next();
 });
+
+// Strategic database indexes for queries
+OrderSchema.index({ status: 1, createdAt: -1 });
+OrderSchema.index({ student: 1, createdAt: -1 });
+OrderSchema.index({ partner: 1, createdAt: -1 });
 
 const Order = mongoose.model('Order', OrderSchema);
 export default Order;

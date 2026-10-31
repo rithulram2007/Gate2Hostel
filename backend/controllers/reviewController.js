@@ -14,6 +14,10 @@ export const createReview = async (req, res, next) => {
     return next(new ApiError('Rating must be between 1 and 5', 400));
   }
 
+  if (comment && typeof comment === 'string' && comment.trim().length > 500) {
+    return next(new ApiError('Review comment cannot exceed 500 characters', 400));
+  }
+
   try {
     const order = await Order.findById(orderId);
     if (!order) {

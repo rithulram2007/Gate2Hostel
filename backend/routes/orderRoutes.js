@@ -10,6 +10,7 @@ import {
   getUserOrderHistory
 } from '../controllers/orderController.js';
 import { protect } from '../middlewares/authMiddleware.js';
+import { otpLimiter } from '../middlewares/rateLimiters.js';
 
 const router = express.Router();
 
@@ -37,7 +38,7 @@ router.route('/:id')
   .get(protect, getOrderById);
 
 router.put('/:id/accept', protect, acceptOrder);
-router.put('/:id/complete', protect, completeOrder);
+router.put('/:id/complete', protect, otpLimiter, completeOrder);
 router.put('/:id/cancel', protect, cancelOrder);
 
 export default router;
