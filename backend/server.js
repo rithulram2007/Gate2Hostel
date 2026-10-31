@@ -17,6 +17,7 @@ import chatRoutes from './routes/chatRoutes.js';
 import reviewRoutes from './routes/reviewRoutes.js';
 import complaintRoutes from './routes/complaintRoutes.js';
 import adminRoutes from './routes/adminRoutes.js';
+import transactionRoutes from './routes/transactionRoutes.js';
 
 // Load Env variables
 dotenv.config();
@@ -71,6 +72,7 @@ app.use('/api/chat', chatRoutes);
 app.use('/api/reviews', reviewRoutes);
 app.use('/api/complaints', complaintRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/transactions', transactionRoutes);
 
 // Basic Route / Health Check
 app.get('/api/health', (req, res) => {

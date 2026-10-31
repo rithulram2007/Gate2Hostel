@@ -78,7 +78,8 @@ export const createOrder = async (req, res, next) => {
       amount: -requiredReward,
       type: 'reward_payment',
       order: order._id,
-      status: 'success'
+      status: 'success',
+      description: 'Order Reward Escrow'
     });
 
     // Emit live order feed update to all online users
@@ -288,7 +289,8 @@ export const completeOrder = async (req, res, next) => {
       amount: order.rewardAmount,
       type: 'reward_received',
       order: order._id,
-      status: 'success'
+      status: 'success',
+      description: 'Delivery Reward Received'
     });
 
     // Notify student via sockets
@@ -345,7 +347,8 @@ export const cancelOrder = async (req, res, next) => {
         amount: order.rewardAmount,
         type: 'deposit_refund',
         order: order._id,
-        status: 'success'
+        status: 'success',
+        description: 'Order Reward Refund'
       });
 
       req.io.emit('order_cancelled', { orderId: order._id });
@@ -416,7 +419,8 @@ export const cancelOrder = async (req, res, next) => {
           amount: order.rewardAmount,
           type: 'deposit_refund',
           order: order._id,
-          status: 'success'
+          status: 'success',
+          description: 'Order Reward Refund'
         });
 
         req.io.to(order._id.toString()).emit('order_status_change', {

@@ -118,8 +118,26 @@ export const updateProfilePhoto = async (req, res, next) => {
 export const depositWallet = async (req, res, next) => {
   const { amount } = req.body;
 
-  if (!amount || amount <= 0) {
+  // Strict input safety checks
+  if (amount === undefined || amount === null || typeof amount === 'boolean' || amount === '') {
     return next(new ApiError('Please provide a valid deposit amount', 400));
+  }
+
+  const numericAmount = Number(amount);
+
+  if (isNaN(numericAmount) || !Number.isFinite(numericAmount) || numericAmount <= 0) {
+    return next(new ApiError('Please provide a valid positive deposit amount', 400));
+  }
+
+  if (numericAmount > 10000) {
+    return next(new ApiError('Maximum deposit amount per transaction is ₹10,000', 400));
+  }
+
+  // Normalize to 2 decimal places
+  const normalizedAmount = Math.round(numericAmount * 100) / 100;
+
+  if (normalizedAmount <= 0) {
+    return next(new ApiError('Please provide a valid positive deposit amount', 400));
   }
 
   try {
@@ -128,12 +146,28 @@ export const depositWallet = async (req, res, next) => {
       return next(new ApiError('User not found', 404));
     }
 
-    user.walletBalance += Number(amount);
+    user.walletBalance = Math.round((user.walletBalance + normalizedAmount) * 100) / 100;
     await user.save();
+
+    // Log ledger transaction
+    try {
+      await Transaction.create({
+        user: user._id,
+        amount: normalizedAmount,
+        type: 'deposit',
+        status: 'success',
+        description: 'Wallet Top-up'
+      });
+    } catch (txErr) {
+      // Rollback wallet balance if transaction logging fails to preserve consistency
+      user.walletBalance = Math.max(0, Math.round((user.walletBalance - normalizedAmount) * 100) / 100);
+      await user.save();
+      throw txErr;
+    }
 
     res.status(200).json({
       success: true,
-      message: `Successfully deposited ₹${amount} into wallet`,
+      message: `Successfully deposited ₹${normalizedAmount} into wallet`,
       walletBalance: user.walletBalance
     });
   } catch (error) {
@@ -160,7 +194,7 @@ export const paySecurityDeposit = async (req, res, next) => {
     }
 
     // Process payment
-    user.walletBalance -= 500;
+    user.walletBalance = Math.round((user.walletBalance - 500) * 100) / 100;
     user.isVerifiedPartner = true;
     user.securityDepositPaid = true;
     await user.save();
@@ -170,7 +204,8 @@ export const paySecurityDeposit = async (req, res, next) => {
       user: user._id,
       amount: -500,
       type: 'security_deposit',
-      status: 'success'
+      status: 'success',
+      description: 'Partner Security Deposit'
     });
 
     res.status(200).json({
@@ -198,7 +233,7 @@ export const refundSecurityDeposit = async (req, res, next) => {
     }
 
     // Process refund
-    user.walletBalance += 500;
+    user.walletBalance = Math.round((user.walletBalance + 500) * 100) / 100;
     user.isVerifiedPartner = false;
     user.securityDepositPaid = false;
     await user.save();
@@ -208,7 +243,8 @@ export const refundSecurityDeposit = async (req, res, next) => {
       user: user._id,
       amount: 500,
       type: 'deposit_refund',
-      status: 'success'
+      status: 'success',
+      description: 'Security Deposit Refund'
     });
 
     res.status(200).json({

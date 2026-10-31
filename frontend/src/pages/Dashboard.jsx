@@ -1,13 +1,18 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { Link } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
 import { useTheme } from '../contexts/ThemeContext';
 import { useAxiosPrivate } from '../hooks/useAxiosPrivate';
 import { io } from 'socket.io-client';
 import CreateOrderModal from '../components/orders/CreateOrderModal';
+import OrderDiscoveryToolbar from '../components/orders/OrderDiscoveryToolbar';
+import TransactionHistory from '../components/wallet/TransactionHistory';
+import { matchesHostel } from '../utils/hostelUtils';
 import { 
   FiPlus, FiLogOut, FiSun, FiMoon, FiBriefcase, FiUser, 
   FiMapPin, FiClock, FiActivity, FiDollarSign, FiAward, 
-  FiShield, FiCheckCircle, FiAlertCircle, FiXCircle, FiTrendingUp 
+  FiShield, FiCheckCircle, FiAlertCircle, FiXCircle, FiTrendingUp,
+  FiEye, FiSearch, FiRotateCcw
 } from 'react-icons/fi';
 import { MdOutlineDeliveryDining, MdOutlineCategory } from 'react-icons/md';
 
@@ -23,6 +28,7 @@ export const Dashboard = () => {
   const [activeTab, setActiveTab] = useState('student'); // 'student' | 'partner'
   const [isOnline, setIsOnline] = useState(false);
   const [orders, setOrders] = useState([]); // Available public orders
+  const [loadingPublicOrders, setLoadingPublicOrders] = useState(true);
   const [historyOrders, setHistoryOrders] = useState([]); // User's personal order history
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [walletAmount, setWalletAmount] = useState('');
@@ -30,14 +36,29 @@ export const Dashboard = () => {
   const [submittingWallet, setSubmittingWallet] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
+  const [txRefreshTrigger, setTxRefreshTrigger] = useState(0);
+
+  // Discovery Filter States (Partner Mode)
+  const [searchQuery, setSearchQuery] = useState('');
+  const [selectedCategory, setSelectedCategory] = useState('all');
+  const [selectedHostel, setSelectedHostel] = useState('all');
+  const [sortBy, setSortBy] = useState('newest');
 
   // Fetch public feed (pending orders)
   const fetchPublicOrders = async () => {
+    setLoadingPublicOrders(true);
     try {
       const response = await axiosPrivate.get('/orders?status=pending');
-      setOrders(response.data.orders);
+      const rawOrders = response.data?.orders || [];
+      const normalized = rawOrders.map((ord) => ({
+        ...ord,
+        _id: ord._id || ord.id
+      }));
+      setOrders(normalized);
     } catch (error) {
       console.error('Error fetching public orders:', error);
+    } finally {
+      setLoadingPublicOrders(false);
     }
   };
 
@@ -67,12 +88,24 @@ export const Dashboard = () => {
 
     // Listen for live order feeds
     socketRef.current.on('order_created', (newOrder) => {
-      // Add to available feeds if in partner mode
-      setOrders((prev) => [newOrder, ...prev]);
+      if (!newOrder) return;
+      const normalized = {
+        ...newOrder,
+        _id: newOrder._id || newOrder.id
+      };
+      if (!normalized._id) return;
+
+      setOrders((prev) => {
+        // Prevent duplicate orders
+        const exists = prev.some((o) => (o._id || o.id) === normalized._id);
+        if (exists) return prev;
+        return [normalized, ...prev];
+      });
     });
 
     socketRef.current.on('order_cancelled', ({ orderId }) => {
-      setOrders((prev) => prev.filter((o) => o._id !== orderId));
+      if (!orderId) return;
+      setOrders((prev) => prev.filter((o) => (o._id || o.id) !== orderId));
       fetchPersonalHistory();
     });
 
@@ -115,6 +148,7 @@ export const Dashboard = () => {
         ...user,
         walletBalance: user.walletBalance - response.data.order.rewardAmount
       });
+      setTxRefreshTrigger((prev) => prev + 1);
       fetchPersonalHistory();
     } catch (err) {
       setErrorMsg(err.response?.data?.message || 'Failed to place request.');
@@ -156,7 +190,7 @@ export const Dashboard = () => {
         walletBalance: user.walletBalance + response.data.order.rewardAmount,
         totalDeliveries: user.totalDeliveries + 1
       });
-      
+      setTxRefreshTrigger((prev) => prev + 1);
       fetchPersonalHistory();
     } catch (err) {
       setErrorMsg(err.response?.data?.message || 'OTP verification failed.');
@@ -179,6 +213,7 @@ export const Dashboard = () => {
         });
       }
       
+      setTxRefreshTrigger((prev) => prev + 1);
       fetchPublicOrders();
       fetchPersonalHistory();
     } catch (err) {
@@ -202,6 +237,7 @@ export const Dashboard = () => {
         walletBalance: response.data.walletBalance
       });
       setWalletAmount('');
+      setTxRefreshTrigger((prev) => prev + 1);
     } catch (err) {
       setErrorMsg('Deposit simulation failed.');
     } finally {
@@ -217,6 +253,7 @@ export const Dashboard = () => {
       const response = await axiosPrivate.post('/profile/partner/verify');
       setSuccessMsg('Verified Partner Badge Activated!');
       updateUserInfo(response.data.user);
+      setTxRefreshTrigger((prev) => prev + 1);
     } catch (err) {
       setErrorMsg(err.response?.data?.message || 'Failed to pay security deposit.');
     }
@@ -230,6 +267,7 @@ export const Dashboard = () => {
       const response = await axiosPrivate.post('/profile/partner/refund');
       setSuccessMsg('Security deposit refunded and verification badge removed.');
       updateUserInfo(response.data.user);
+      setTxRefreshTrigger((prev) => prev + 1);
     } catch (err) {
       setErrorMsg(err.response?.data?.message || 'Failed to refund deposit.');
     }
@@ -239,6 +277,83 @@ export const Dashboard = () => {
   const activePlaced = historyOrders.filter((o) => o.student._id === user._id && o.status !== 'completed' && o.status !== 'cancelled');
   const activeAccepted = historyOrders.filter((o) => o.partner && o.partner._id === user._id && o.status !== 'completed' && o.status !== 'cancelled');
   const pastOrders = historyOrders.filter((o) => o.status === 'completed' || o.status === 'cancelled');
+
+  // Category counts computed from raw pending orders
+  const categoryCounts = useMemo(() => {
+    const counts = { all: orders.length };
+    orders.forEach((ord) => {
+      if (ord.category) {
+        counts[ord.category] = (counts[ord.category] || 0) + 1;
+      }
+    });
+    return counts;
+  }, [orders]);
+
+  // Check if any filters are actively applied
+  const hasActiveFilters =
+    searchQuery.trim() !== '' ||
+    selectedCategory !== 'all' ||
+    selectedHostel !== 'all' ||
+    sortBy !== 'newest';
+
+  // Handler to reset all filters
+  const handleResetFilters = () => {
+    setSearchQuery('');
+    setSelectedCategory('all');
+    setSelectedHostel('all');
+    setSortBy('newest');
+  };
+
+  // Derived filtered & sorted discovery pipeline
+  const filteredOrders = useMemo(() => {
+    const query = searchQuery.trim().toLowerCase();
+
+    // 1. Filter
+    const filtered = orders.filter((ord) => {
+      // Search keyword filter across item, pickup, hostel, and requester name
+      if (query) {
+        const itemName = (ord.itemName || '').toLowerCase();
+        const pickup = (ord.pickupLocation || '').toLowerCase();
+        const drop = (ord.dropHostel || '').toLowerCase();
+        const studentName = (ord.student?.name || '').toLowerCase();
+
+        const matchesSearch =
+          itemName.includes(query) ||
+          pickup.includes(query) ||
+          drop.includes(query) ||
+          studentName.includes(query);
+
+        if (!matchesSearch) return false;
+      }
+
+      // Category filter
+      if (selectedCategory !== 'all') {
+        if (ord.category !== selectedCategory) return false;
+      }
+
+      // Hostel block filter
+      if (selectedHostel !== 'all') {
+        if (!matchesHostel(ord.dropHostel, selectedHostel)) return false;
+      }
+
+      return true;
+    });
+
+    // 2. Sort on shallow copy (non-mutating)
+    return [...filtered].sort((a, b) => {
+      if (sortBy === 'reward_desc') {
+        return (b.rewardAmount || 0) - (a.rewardAmount || 0);
+      }
+      if (sortBy === 'reward_asc') {
+        return (a.rewardAmount || 0) - (b.rewardAmount || 0);
+      }
+      if (sortBy === 'oldest') {
+        return new Date(a.createdAt || 0) - new Date(b.createdAt || 0);
+      }
+      // Default: 'newest'
+      return new Date(b.createdAt || 0) - new Date(a.createdAt || 0);
+    });
+  }, [orders, searchQuery, selectedCategory, selectedHostel, sortBy]);
 
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 transition-colors duration-300 font-sans flex flex-col">
@@ -255,6 +370,14 @@ export const Dashboard = () => {
           </div>
 
           <div className="flex items-center gap-4">
+            {user?.role === 'admin' && (
+              <Link
+                to="/admin"
+                className="px-3 py-2 rounded-xl bg-purple-50 hover:bg-purple-100 dark:bg-purple-950/40 dark:hover:bg-purple-900/50 text-purple-700 dark:text-purple-300 border border-purple-200/50 dark:border-purple-800/40 text-xs font-bold transition-all flex items-center gap-1.5 shadow-sm"
+              >
+                <FiShield /> Admin Panel
+              </Link>
+            )}
             <button
               onClick={toggleTheme}
               className="p-2 rounded-xl bg-slate-100 dark:bg-slate-900 hover:bg-slate-200 text-slate-700 dark:text-slate-200 transition-all"
@@ -506,6 +629,13 @@ export const Dashboard = () => {
                             </div>
                           )}
 
+                          <Link
+                            to={`/order/${ord._id}`}
+                            className="w-full py-1.5 bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/50 dark:hover:bg-indigo-900/50 text-indigo-700 dark:text-indigo-300 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1"
+                          >
+                            <FiEye /> View Order & Chat
+                          </Link>
+
                           <button
                             type="button"
                             onClick={() => handleCancelOrder(ord._id, ord.rewardAmount, true)}
@@ -608,6 +738,13 @@ export const Dashboard = () => {
                                 </button>
                               </div>
 
+                              <Link
+                                to={`/order/${ord._id}`}
+                                className="w-full py-1.5 bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/50 dark:hover:bg-indigo-900/50 text-indigo-700 dark:text-indigo-300 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1"
+                              >
+                                <FiEye /> View Order & Chat
+                              </Link>
+
                               <button
                                 type="button"
                                 onClick={() => handleCancelOrder(ord._id, ord.rewardAmount, false)}
@@ -624,17 +761,82 @@ export const Dashboard = () => {
 
                   {/* Public Feed Orders */}
                   <div className="space-y-4">
-                    <h3 className="font-extrabold text-base text-slate-800 dark:text-white flex items-center gap-2">
-                      <FiTrendingUp className="text-indigo-650 dark:text-indigo-400" /> Public Campus Feed
-                    </h3>
+                    <div className="flex items-center justify-between">
+                      <h3 className="font-extrabold text-base text-slate-800 dark:text-white flex items-center gap-2">
+                        <FiTrendingUp className="text-indigo-650 dark:text-indigo-400" /> Public Campus Feed
+                      </h3>
+                    </div>
+
+                    {/* Discovery & Filter Toolbar */}
+                    <OrderDiscoveryToolbar
+                      searchQuery={searchQuery}
+                      onSearchChange={setSearchQuery}
+                      selectedCategory={selectedCategory}
+                      onCategoryChange={setSelectedCategory}
+                      selectedHostel={selectedHostel}
+                      onHostelChange={setSelectedHostel}
+                      sortBy={sortBy}
+                      onSortChange={setSortBy}
+                      onResetFilters={handleResetFilters}
+                      hasActiveFilters={hasActiveFilters}
+                      totalOrdersCount={orders.length}
+                      filteredOrdersCount={filteredOrders.length}
+                      categoryCounts={categoryCounts}
+                    />
                     
-                    {orders.length === 0 ? (
+                    {loadingPublicOrders ? (
+                      /* Skeleton Loading Cards */
+                      <div className="grid sm:grid-cols-2 gap-4">
+                        {[1, 2, 3, 4].map((n) => (
+                          <div
+                            key={n}
+                            className="p-5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200/60 dark:border-slate-800/60 shadow-md space-y-4 animate-pulse"
+                          >
+                            <div className="flex justify-between items-start">
+                              <div className="w-20 h-4 bg-slate-200 dark:bg-slate-800 rounded-full" />
+                              <div className="w-16 h-4 bg-slate-200 dark:bg-slate-800 rounded-full" />
+                            </div>
+                            <div className="w-3/4 h-5 bg-slate-200 dark:bg-slate-800 rounded-lg" />
+                            <div className="space-y-2">
+                              <div className="w-1/2 h-3 bg-slate-100 dark:bg-slate-800/60 rounded" />
+                              <div className="w-2/3 h-3 bg-slate-100 dark:bg-slate-800/60 rounded" />
+                            </div>
+                            <div className="flex gap-2 pt-2">
+                              <div className="w-10 h-8 bg-slate-100 dark:bg-slate-800 rounded-xl" />
+                              <div className="flex-grow h-8 bg-slate-200 dark:bg-slate-800 rounded-xl" />
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : orders.length === 0 ? (
+                      /* Empty State Case A: No pending orders on campus */
                       <div className="p-8 rounded-3xl border border-dashed border-slate-250 dark:border-slate-800 text-center text-slate-450 dark:text-slate-500">
                         <p className="text-xs">No pending requests available on campus right now. Check back soon!</p>
                       </div>
+                    ) : filteredOrders.length === 0 ? (
+                      /* Empty State Case B: Orders exist, but none match filters */
+                      <div className="p-8 rounded-3xl border border-dashed border-slate-200 dark:border-slate-800 text-center space-y-3">
+                        <div className="w-10 h-10 rounded-2xl bg-slate-100 dark:bg-slate-800 text-slate-450 dark:text-slate-500 flex items-center justify-center text-lg mx-auto">
+                          <FiSearch />
+                        </div>
+                        <div>
+                          <h4 className="font-bold text-sm text-slate-800 dark:text-white">No matching requests found</h4>
+                          <p className="text-xs text-slate-400 mt-1">
+                            No pending orders match your active search and filter criteria.
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={handleResetFilters}
+                          className="px-4 py-2 bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 rounded-xl text-xs font-bold transition-all inline-flex items-center gap-1.5"
+                        >
+                          <FiRotateCcw className="text-[11px]" /> Clear All Filters
+                        </button>
+                      </div>
                     ) : (
+                      /* Filtered Order Grid */
                       <div className="grid sm:grid-cols-2 gap-4">
-                        {orders.map((ord) => (
+                        {filteredOrders.map((ord) => (
                           <div key={ord._id} className="p-5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200/60 dark:border-slate-800/60 shadow-md flex flex-col justify-between space-y-4 hover:border-indigo-500/20 transition-all">
                             <div>
                               <div className="flex justify-between items-start">
@@ -644,7 +846,9 @@ export const Dashboard = () => {
                                 <span className="font-extrabold text-indigo-650 dark:text-indigo-400 text-sm">₹{ord.rewardAmount} Reward</span>
                               </div>
 
-                              <h4 className="font-bold text-sm text-slate-800 dark:text-white mt-3">{ord.itemName}</h4>
+                              <Link to={`/order/${ord._id}`} className="hover:underline">
+                                <h4 className="font-bold text-sm text-slate-800 dark:text-white mt-3 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">{ord.itemName}</h4>
+                              </Link>
                               
                               <div className="mt-2 space-y-1 text-xs text-slate-500 dark:text-slate-400">
                                 <p className="flex items-center gap-1"><FiMapPin className="text-[10px]" /> Pickup: {ord.pickupLocation}</p>
@@ -652,13 +856,22 @@ export const Dashboard = () => {
                               </div>
                             </div>
 
-                            <button
-                              type="button"
-                              onClick={() => handleAcceptOrder(ord._id)}
-                              className="w-full py-2 bg-indigo-600 hover:bg-indigo-550 text-white font-bold rounded-xl text-xs shadow-md shadow-indigo-650/5 transition-all flex items-center justify-center gap-1"
-                            >
-                              <MdOutlineDeliveryDining className="text-base" /> Accept Delivery
-                            </button>
+                            <div className="flex gap-2">
+                              <Link
+                                to={`/order/${ord._id}`}
+                                className="py-2 px-3 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-200 font-bold rounded-xl text-xs transition-all flex items-center justify-center"
+                                title="View Details & Location"
+                              >
+                                <FiEye />
+                              </Link>
+                              <button
+                                type="button"
+                                onClick={() => handleAcceptOrder(ord._id)}
+                                className="flex-grow py-2 bg-indigo-600 hover:bg-indigo-550 text-white font-bold rounded-xl text-xs shadow-md shadow-indigo-650/5 transition-all flex items-center justify-center gap-1"
+                              >
+                                <MdOutlineDeliveryDining className="text-base" /> Accept Delivery
+                              </button>
+                            </div>
                           </div>
                         ))}
                       </div>
@@ -670,9 +883,17 @@ export const Dashboard = () => {
             </div>
           )}
 
-          {/* Past Order History Logs */}
+          {/* Real Financial Transaction History Ledger (Unit 6) */}
+          <TransactionHistory refreshTrigger={txRefreshTrigger} />
+
+          {/* Past Order Delivery History Logs */}
           <div className="p-6 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200/50 dark:border-slate-800/50 shadow-xl space-y-4">
-            <h4 className="font-extrabold text-slate-800 dark:text-white">Transaction & Delivery History</h4>
+            <div>
+              <h4 className="font-extrabold text-slate-800 dark:text-white">Past Delivery Orders</h4>
+              <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                Record of completed and cancelled campus delivery requests
+              </p>
+            </div>
             {pastOrders.length === 0 ? (
               <p className="text-xs text-slate-500 dark:text-slate-400">No completed or cancelled orders on record.</p>
             ) : (
@@ -684,12 +905,17 @@ export const Dashboard = () => {
                       <th className="py-2.5 font-bold">Type</th>
                       <th className="py-2.5 font-bold">Reward</th>
                       <th className="py-2.5 font-bold">Status</th>
+                      <th className="py-2.5 font-bold text-right">Action</th>
                     </tr>
                   </thead>
                   <tbody>
                     {pastOrders.map((ord) => (
                       <tr key={ord._id} className="border-b border-slate-100 dark:border-slate-850 hover:bg-slate-50/50 dark:hover:bg-slate-850/50 transition-colors">
-                        <td className="py-3 font-semibold text-slate-800 dark:text-slate-200">{ord.itemName}</td>
+                        <td className="py-3 font-semibold text-slate-800 dark:text-slate-200">
+                          <Link to={`/order/${ord._id}`} className="hover:text-indigo-600 dark:hover:text-indigo-400 hover:underline">
+                            {ord.itemName}
+                          </Link>
+                        </td>
                         <td className="py-3 text-slate-500 capitalize">{ord.category}</td>
                         <td className="py-3 font-bold text-slate-700 dark:text-slate-350">₹{ord.rewardAmount}</td>
                         <td className="py-3">
@@ -700,6 +926,14 @@ export const Dashboard = () => {
                           }`}>
                             {ord.status}
                           </span>
+                        </td>
+                        <td className="py-3 text-right">
+                          <Link
+                            to={`/order/${ord._id}`}
+                            className="text-indigo-600 dark:text-indigo-400 hover:underline font-bold text-[11px] inline-flex items-center gap-1"
+                          >
+                            Details →
+                          </Link>
                         </td>
                       </tr>
                     ))}

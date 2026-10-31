@@ -28,8 +28,15 @@ const TransactionSchema = new mongoose.Schema({
   createdAt: {
     type: Date,
     default: Date.now
+  },
+  description: {
+    type: String,
+    default: ''
   }
 });
+
+// Index for efficient user transaction history queries (newest first)
+TransactionSchema.index({ user: 1, createdAt: -1 });
 
 const Transaction = mongoose.model('Transaction', TransactionSchema);
 export default Transaction;

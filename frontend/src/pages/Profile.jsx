@@ -1,10 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
 import { useTheme } from '../contexts/ThemeContext';
 import useAxiosPrivate from '../hooks/useAxiosPrivate';
-import { FiStar, FiShield, FiTrendingUp, FiEdit3, FiSave, FiArrowLeft, FiSun, FiMoon, FiAlertCircle } from 'react-icons/fi';
-import { MdOutlineDeliveryDining } from 'react-icons/md';
+import { FiStar, FiShield, FiEdit3, FiSave, FiArrowLeft, FiSun, FiMoon, FiAlertCircle, FiAlertTriangle } from 'react-icons/fi';
+import FileComplaintModal from '../components/common/FileComplaintModal';
+import ReviewCard from '../components/reviews/ReviewCard';
 
 export const Profile = () => {
   const { userId } = useParams();
@@ -16,13 +17,32 @@ export const Profile = () => {
 
   const [profileData, setProfileData] = useState(null);
   const [reviews, setReviews] = useState([]);
+  const [loadingReviews, setLoadingReviews] = useState(true);
+  const [reviewError, setReviewError] = useState('');
   const [editing, setEditing] = useState(false);
   const [editForm, setEditForm] = useState({ name: '', phone: '', hostel: '', block: '', roomNumber: '' });
+  const [isComplaintModalOpen, setIsComplaintModalOpen] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
 
+  const fetchReviewsData = useCallback(async (targetId) => {
+    if (!targetId) return;
+    setLoadingReviews(true);
+    setReviewError('');
+    try {
+      const res = await axiosPrivate.get(`/reviews/user/${targetId}`);
+      setReviews(res.data.reviews || []);
+    } catch (err) {
+      console.error('Failed to load reviews:', err);
+      setReviewError(err.response?.data?.message || 'Unable to load reviews.');
+    } finally {
+      setLoadingReviews(false);
+    }
+  }, [axiosPrivate]);
+
   useEffect(() => {
-    const fetchProfile = async () => {
+    const fetchProfileAndReviews = async () => {
+      setError('');
       try {
         if (isOwnProfile) {
           const res = await axiosPrivate.get('/profile/me');
@@ -34,37 +54,28 @@ export const Profile = () => {
             block: res.data.user.block || 'A',
             roomNumber: res.data.user.roomNumber || ''
           });
+          const ownId = res.data.user?._id || user?._id;
+          if (ownId) {
+            await fetchReviewsData(ownId);
+          }
         } else {
           const res = await axiosPrivate.get(`/profile/public/${userId}`);
           setProfileData(res.data.profile);
-          setReviews(res.data.reviews);
+          if (res.data.reviews) {
+            setReviews(res.data.reviews);
+            setLoadingReviews(false);
+          } else {
+            await fetchReviewsData(userId);
+          }
         }
       } catch (err) {
-        setError('Failed to load profile');
+        setError(err.response?.data?.message || 'Failed to load profile');
+        setLoadingReviews(false);
       }
     };
 
-    if (!isOwnProfile) {
-      const fetchReviews = async () => {
-        try {
-          const res = await axiosPrivate.get(`/reviews/user/${userId}`);
-          setReviews(res.data.reviews);
-        } catch (err) { /* ignore */ }
-      };
-      fetchProfile();
-      fetchReviews();
-    } else {
-      fetchProfile();
-      // Fetch own reviews
-      const fetchOwnReviews = async () => {
-        try {
-          const res = await axiosPrivate.get(`/reviews/user/${user._id}`);
-          setReviews(res.data.reviews);
-        } catch (err) { /* ignore */ }
-      };
-      fetchOwnReviews();
-    }
-  }, [userId, isOwnProfile]);
+    fetchProfileAndReviews();
+  }, [userId, isOwnProfile, axiosPrivate, fetchReviewsData, user?._id]);
 
   const handleSaveProfile = async (e) => {
     e.preventDefault();
@@ -146,6 +157,15 @@ export const Profile = () => {
                 <FiEdit3 /> Edit Profile
               </button>
             )}
+            {!isOwnProfile && (
+              <button
+                type="button"
+                onClick={() => setIsComplaintModalOpen(true)}
+                className="px-4 py-2 bg-rose-50 dark:bg-rose-950/40 hover:bg-rose-100 dark:hover:bg-rose-900/50 text-rose-600 dark:text-rose-400 border border-rose-200/50 dark:border-rose-900/40 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-sm"
+              >
+                <FiAlertTriangle /> Report User
+              </button>
+            )}
           </div>
 
           {/* Edit Form */}
@@ -196,52 +216,92 @@ export const Profile = () => {
             </div>
             <div>
               <p className="text-2xl font-black">{displayUser.complaintsCount || 0}</p>
-              <p className="text-[10px] text-indigo-300 uppercase mt-1">Complaints</p>
+              <p className="text-[10px] text-indigo-300 uppercase mt-1" title="Quality flags on record (includes 1-star reviews and filed reports)">Quality Flags</p>
             </div>
           </div>
         </div>
 
         {/* Public Reviews Section */}
-        <div className="p-6 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200/50 dark:border-slate-800/50 shadow-xl">
-          <h3 className="font-extrabold text-slate-800 dark:text-white mb-4 flex items-center gap-2">
-            <FiStar className="text-amber-500" /> Public Reviews ({reviews.length})
-          </h3>
+        <div className="p-6 sm:p-8 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200/50 dark:border-slate-800/50 shadow-xl space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 pb-3 border-b border-slate-100 dark:border-slate-800">
+            <h3 className="font-extrabold text-base text-slate-800 dark:text-white flex items-center gap-2">
+              <FiStar className="text-amber-500 fill-amber-500" />
+              <span>Public Reviews</span>
+              <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">
+                {reviews.length} {reviews.length === 1 ? 'review' : 'reviews'}
+              </span>
+            </h3>
 
-          {reviews.length === 0 ? (
-            <p className="text-xs text-slate-400 py-4 text-center">No reviews yet.</p>
-          ) : (
-            <div className="space-y-4">
-              {reviews.map((rev) => (
-                <div key={rev._id} className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/30 border border-slate-100 dark:border-slate-800 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <img
-                        src={rev.reviewer?.profilePhoto || `https://api.dicebear.com/7.x/initials/svg?seed=${rev.reviewerName || rev.reviewer?.name || 'U'}`}
-                        alt=""
-                        className="w-8 h-8 rounded-full object-cover"
-                      />
-                      <span className="font-bold text-sm text-slate-800 dark:text-white">
-                        {rev.reviewerName || rev.reviewer?.name || 'Anonymous'}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-0.5">
-                      {[...Array(5)].map((_, i) => (
-                        <FiStar
-                          key={i}
-                          className={`text-sm ${i < rev.rating ? 'text-amber-500 fill-amber-500' : 'text-slate-300 dark:text-slate-700'}`}
-                        />
-                      ))}
+            <div className="flex items-center gap-2 text-xs font-semibold text-slate-500 dark:text-slate-400">
+              <span>Overall Rating:</span>
+              <span className="text-amber-500 font-extrabold text-sm flex items-center gap-1">
+                ⭐ {Number(displayUser.averageRating || 5).toFixed(1)}
+              </span>
+            </div>
+          </div>
+
+          {loadingReviews ? (
+            /* Loading Skeleton */
+            <div className="space-y-3 pt-2">
+              {[1, 2].map((n) => (
+                <div key={n} className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-850/60 border border-slate-100 dark:border-slate-800 animate-pulse flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-full bg-slate-200 dark:bg-slate-800" />
+                    <div className="space-y-2">
+                      <div className="w-32 h-3.5 bg-slate-200 dark:bg-slate-800 rounded" />
+                      <div className="w-20 h-2.5 bg-slate-200 dark:bg-slate-800 rounded" />
                     </div>
                   </div>
-                  {rev.comment && (
-                    <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed pl-10">"{rev.comment}"</p>
-                  )}
-                  <p className="text-[10px] text-slate-400 pl-10">{new Date(rev.createdAt).toLocaleDateString()}</p>
+                  <div className="w-16 h-4 bg-slate-200 dark:bg-slate-800 rounded" />
                 </div>
+              ))}
+            </div>
+          ) : reviewError ? (
+            /* Error State */
+            <div className="p-6 rounded-2xl bg-red-50/60 dark:bg-red-950/20 border border-red-200/60 dark:border-red-900/40 text-center space-y-3">
+              <FiAlertCircle className="w-6 h-6 text-red-500 mx-auto" />
+              <p className="text-xs font-semibold text-red-700 dark:text-red-400">{reviewError}</p>
+              <button
+                type="button"
+                onClick={() => fetchReviewsData(isOwnProfile ? (profileData?._id || user?._id) : userId)}
+                className="px-4 py-1.5 bg-red-600 hover:bg-red-500 text-white text-xs font-bold rounded-xl transition-all shadow-md shadow-red-600/20"
+              >
+                Retry Loading
+              </button>
+            </div>
+          ) : reviews.length === 0 ? (
+            /* Empty State */
+            <div className="p-8 rounded-2xl bg-slate-50/70 dark:bg-slate-850/40 border border-slate-100 dark:border-slate-800/80 text-center space-y-2">
+              <div className="w-12 h-12 rounded-2xl bg-slate-100 dark:bg-slate-800 text-slate-400 dark:text-slate-500 flex items-center justify-center mx-auto text-xl">
+                <FiStar />
+              </div>
+              <h4 className="text-sm font-bold text-slate-700 dark:text-slate-200">No reviews yet</h4>
+              <p className="text-xs text-slate-500 dark:text-slate-400 max-w-sm mx-auto">
+                Completed campus delivery ratings and feedback for this user will appear here.
+              </p>
+            </div>
+          ) : (
+            /* Reviews List */
+            <div className="space-y-3">
+              {reviews.map((rev) => (
+                <ReviewCard key={rev._id} review={rev} isOwnReview={false} />
               ))}
             </div>
           )}
         </div>
+
+        {/* File Complaint Modal */}
+        {!isOwnProfile && displayUser && (
+          <FileComplaintModal
+            isOpen={isComplaintModalOpen}
+            onClose={() => setIsComplaintModalOpen(false)}
+            reportedUser={displayUser}
+            onSuccess={() => {
+              setSuccess('Complaint filed against user. Admin team will review.');
+              setProfileData((prev) => (prev ? { ...prev, complaintsCount: (prev.complaintsCount || 0) + 1 } : prev));
+            }}
+          />
+        )}
       </main>
     </div>
   );
