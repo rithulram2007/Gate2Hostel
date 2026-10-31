@@ -54,7 +54,8 @@ const OrderSchema = new mongoose.Schema({
   },
   otp: {
     type: String,
-    required: true // Store secure OTP code
+    required: true,
+    select: false // Never exposed in queries by default
   },
   otpAttempts: {
     type: Number,
@@ -82,6 +83,8 @@ OrderSchema.pre('save', function (next) {
 
 // Strategic database indexes for queries
 OrderSchema.index({ status: 1, createdAt: -1 });
+OrderSchema.index({ status: 1, category: 1, createdAt: -1 });
+OrderSchema.index({ status: 1, rewardAmount: -1 });
 OrderSchema.index({ student: 1, createdAt: -1 });
 OrderSchema.index({ partner: 1, createdAt: -1 });
 

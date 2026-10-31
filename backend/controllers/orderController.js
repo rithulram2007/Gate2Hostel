@@ -130,52 +130,96 @@ export const createOrder = async (req, res, next) => {
   }
 };
 
-// @desc    Get all orders (with filters)
+// @desc    Get all orders (with filters, pagination & sorting)
 // @route   GET /api/orders
 // @access  Private
 export const getOrders = async (req, res, next) => {
-  const { category, dropHostel, status, search, minReward } = req.query;
+  const { category, dropHostel, status, search, minReward, page = 1, limit = 10, sortBy = 'newest' } = req.query;
 
   try {
     let query = {};
 
-    // Filters
-    if (status && typeof status === 'string') {
+    // Public discovery feed is strictly for pending orders for normal users
+    if (req.user && req.user.role === 'admin' && status && typeof status === 'string') {
       query.status = status;
     } else {
-      query.status = 'pending'; // Default to active requests
+      query.status = 'pending'; // Normal users strictly discover pending requests
     }
 
-    if (category && typeof category === 'string') {
+    if (category && typeof category === 'string' && category !== 'all') {
       query.category = category;
     }
 
-    if (dropHostel && typeof dropHostel === 'string') {
-      query.dropHostel = dropHostel;
+    if (dropHostel && typeof dropHostel === 'string' && dropHostel !== 'all') {
+      // Support grouped hostel prefix filters (group_mh -> /^MH-/, group_lh -> /^LH-/)
+      if (dropHostel === 'group_mh') {
+        query.dropHostel = { $regex: '^MH-', $options: 'i' };
+      } else if (dropHostel === 'group_lh') {
+        query.dropHostel = { $regex: '^LH-', $options: 'i' };
+      } else {
+        query.dropHostel = { $regex: `^${dropHostel.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, $options: 'i' };
+      }
     }
 
-    if (minReward) {
-      query.rewardAmount = { $gte: Number(minReward) };
+    if (minReward && !isNaN(Number(minReward))) {
+      const minVal = Math.max(0, Number(minReward));
+      query.rewardAmount = { $gte: minVal };
     }
 
-    // Search query on item names/pickup points with regex injection escaping
+    // Search query with 100 character length restriction & regex injection escaping
     if (search && typeof search === 'string') {
+      if (search.trim().length > 100) {
+        return next(new ApiError('Search query cannot exceed 100 characters', 400));
+      }
       const sanitizedSearch = search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       if (sanitizedSearch) {
         query.$or = [
           { itemName: { $regex: sanitizedSearch, $options: 'i' } },
-          { pickupLocation: { $regex: sanitizedSearch, $options: 'i' } }
+          { pickupLocation: { $regex: sanitizedSearch, $options: 'i' } },
+          { dropHostel: { $regex: sanitizedSearch, $options: 'i' } }
         ];
       }
     }
 
+    // Whitelist backend sorting
+    const SORT_MAP = {
+      newest: { createdAt: -1 },
+      oldest: { createdAt: 1 },
+      reward_desc: { rewardAmount: -1, createdAt: -1 },
+      reward_asc: { rewardAmount: 1, createdAt: -1 }
+    };
+    const sortKey = (sortBy && typeof sortBy === 'string' && SORT_MAP[sortBy]) ? sortBy : 'newest';
+    const sortObject = SORT_MAP[sortKey];
+
+    // Sanitize pagination inputs
+    const parsedPage = Math.max(1, parseInt(page, 10) || 1);
+    const rawLimit = parseInt(limit, 10) || 10;
+    const parsedLimit = Math.min(50, Math.max(1, isNaN(rawLimit) ? 10 : rawLimit));
+    const skip = (parsedPage - 1) * parsedLimit;
+
+    // Total count for pagination metadata
+    const total = await Order.countDocuments(query);
+    const totalPages = Math.ceil(total / parsedLimit) || 1;
+
+    // Execute query with OTP projection exclusion, sorting, pagination, and lean()
     const orders = await Order.find(query)
+      .select('-otp')
       .populate('student', 'name averageRating isVerifiedPartner')
-      .sort({ createdAt: -1 });
+      .sort(sortObject)
+      .skip(skip)
+      .limit(parsedLimit)
+      .lean();
 
     res.status(200).json({
       success: true,
       count: orders.length,
+      total,
+      pagination: {
+        page: parsedPage,
+        limit: parsedLimit,
+        total,
+        totalPages
+      },
       orders
     });
   } catch (error) {
@@ -189,6 +233,7 @@ export const getOrders = async (req, res, next) => {
 export const getOrderById = async (req, res, next) => {
   try {
     const order = await Order.findById(req.params.id)
+      .select('+otp')
       .populate('student', 'name phone hostel block roomNumber averageRating totalDeliveries isVerifiedPartner')
       .populate('partner', 'name phone averageRating completionRate totalDeliveries isVerifiedPartner');
 
@@ -274,7 +319,7 @@ export const completeOrder = async (req, res, next) => {
   const cleanOtp = String(otp).trim();
 
   try {
-    const order = await Order.findById(req.params.id);
+    const order = await Order.findById(req.params.id).select('+otp');
     if (!order) {
       return next(new ApiError('Order not found', 404));
     }
@@ -529,15 +574,27 @@ export const cancelOrder = async (req, res, next) => {
 // @access  Private
 export const getUserOrderHistory = async (req, res, next) => {
   try {
-    const orders = await Order.find({
+    const rawOrders = await Order.find({
       $or: [
         { student: req.user.id },
         { partner: req.user.id }
       ]
     })
+    .select('+otp')
     .populate('student', 'name email')
     .populate('partner', 'name email')
-    .sort({ createdAt: -1 });
+    .sort({ createdAt: -1 })
+    .lean();
+
+    // Only allow student owner to receive their own OTP code
+    const orders = rawOrders.map((order) => {
+      const isOwner =
+        (order.student?._id ? order.student._id.toString() : order.student?.toString()) === req.user.id;
+      if (!isOwner) {
+        delete order.otp;
+      }
+      return order;
+    });
 
     res.status(200).json({
       success: true,

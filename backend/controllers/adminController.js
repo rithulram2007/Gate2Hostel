@@ -8,29 +8,36 @@ import ApiError from '../utils/apiError.js';
 // @access  Private/Admin
 export const getAnalytics = async (req, res, next) => {
   try {
-    const totalUsers = await User.countDocuments();
-    const totalPartners = await User.countDocuments({ isVerifiedPartner: true });
-    const totalOrders = await Order.countDocuments();
-    const completedOrders = await Order.countDocuments({ status: 'completed' });
-    const cancelledOrders = await Order.countDocuments({ status: 'cancelled' });
-    const pendingOrders = await Order.countDocuments({ status: 'pending' });
-
-    // Revenue aggregation (total reward value processed)
-    const revenueStats = await Transaction.aggregate([
-      { $match: { type: 'reward_received', status: 'success' } },
-      { $group: { _id: null, totalRevenue: { $sum: '$amount' } } }
-    ]);
-
-    // Top 5 delivery partners by deliveries
-    const topPartners = await User.find({ totalDeliveries: { $gt: 0 } })
-      .select('name email averageRating totalDeliveries completionRate isVerifiedPartner')
-      .sort({ totalDeliveries: -1 })
-      .limit(5);
-
-    // Orders by category breakdown
-    const categoryBreakdown = await Order.aggregate([
-      { $group: { _id: '$category', count: { $sum: 1 } } },
-      { $sort: { count: -1 } }
+    const [
+      totalUsers,
+      totalPartners,
+      totalOrders,
+      completedOrders,
+      cancelledOrders,
+      pendingOrders,
+      revenueStats,
+      topPartners,
+      categoryBreakdown
+    ] = await Promise.all([
+      User.countDocuments(),
+      User.countDocuments({ isVerifiedPartner: true }),
+      Order.countDocuments(),
+      Order.countDocuments({ status: 'completed' }),
+      Order.countDocuments({ status: 'cancelled' }),
+      Order.countDocuments({ status: 'pending' }),
+      Transaction.aggregate([
+        { $match: { type: 'reward_received', status: 'success' } },
+        { $group: { _id: null, totalRevenue: { $sum: '$amount' } } }
+      ]),
+      User.find({ totalDeliveries: { $gt: 0 } })
+        .select('name email averageRating totalDeliveries completionRate isVerifiedPartner')
+        .sort({ totalDeliveries: -1 })
+        .limit(5)
+        .lean(),
+      Order.aggregate([
+        { $group: { _id: '$category', count: { $sum: 1 } } },
+        { $sort: { count: -1 } }
+      ])
     ]);
 
     res.status(200).json({
@@ -61,17 +68,24 @@ export const getAllUsers = async (req, res, next) => {
     const { search, role } = req.query;
     let query = {};
 
-    if (role) query.role = role;
-    if (search) {
-      query.$or = [
-        { name: { $regex: search, $options: 'i' } },
-        { email: { $regex: search, $options: 'i' } }
-      ];
+    if (role && typeof role === 'string') query.role = role;
+    if (search && typeof search === 'string') {
+      if (search.trim().length > 100) {
+        return next(new ApiError('Search query cannot exceed 100 characters', 400));
+      }
+      const sanitizedSearch = search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      if (sanitizedSearch) {
+        query.$or = [
+          { name: { $regex: sanitizedSearch, $options: 'i' } },
+          { email: { $regex: sanitizedSearch, $options: 'i' } }
+        ];
+      }
     }
 
     const users = await User.find(query)
       .select('name email role averageRating totalDeliveries completionRate complaintsCount isBanned isVerifiedPartner walletBalance createdAt')
-      .sort({ createdAt: -1 });
+      .sort({ createdAt: -1 })
+      .lean();
 
     res.status(200).json({
       success: true,

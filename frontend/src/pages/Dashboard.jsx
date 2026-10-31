@@ -12,7 +12,7 @@ import {
   FiPlus, FiLogOut, FiSun, FiMoon, FiBriefcase, FiUser, 
   FiMapPin, FiClock, FiActivity, FiDollarSign, FiAward, 
   FiShield, FiCheckCircle, FiAlertCircle, FiXCircle, FiTrendingUp,
-  FiEye, FiSearch, FiRotateCcw
+  FiEye, FiSearch, FiRotateCcw, FiChevronLeft, FiChevronRight
 } from 'react-icons/fi';
 import { MdOutlineDeliveryDining, MdOutlineCategory } from 'react-icons/md';
 
@@ -38,29 +38,64 @@ export const Dashboard = () => {
   const [successMsg, setSuccessMsg] = useState('');
   const [txRefreshTrigger, setTxRefreshTrigger] = useState(0);
 
-  // Discovery Filter States (Partner Mode)
+  // Discovery Filter & Pagination States (Partner Mode)
   const [searchQuery, setSearchQuery] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('all');
   const [selectedHostel, setSelectedHostel] = useState('all');
   const [sortBy, setSortBy] = useState('newest');
+  const [publicPage, setPublicPage] = useState(1);
+  const [publicPagination, setPublicPagination] = useState({ page: 1, limit: 10, total: 0, totalPages: 1 });
 
-  // Fetch public feed (pending orders)
-  const fetchPublicOrders = async () => {
+  // Debounce search input to prevent rapid API requests
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearch(searchQuery);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
+
+  // Fetch public feed (pending orders) with backend pagination, sorting & filters
+  const fetchPublicOrders = async (targetPage = publicPage) => {
     setLoadingPublicOrders(true);
     try {
-      const response = await axiosPrivate.get('/orders?status=pending');
+      const params = new URLSearchParams();
+      params.append('status', 'pending');
+      params.append('page', String(targetPage));
+      params.append('limit', '10');
+      if (sortBy) params.append('sortBy', sortBy);
+      if (selectedCategory && selectedCategory !== 'all') params.append('category', selectedCategory);
+      if (selectedHostel && selectedHostel !== 'all') params.append('dropHostel', selectedHostel);
+      if (debouncedSearch && debouncedSearch.trim()) params.append('search', debouncedSearch.trim().slice(0, 100));
+
+      const response = await axiosPrivate.get(`/orders?${params.toString()}`);
       const rawOrders = response.data?.orders || [];
       const normalized = rawOrders.map((ord) => ({
         ...ord,
         _id: ord._id || ord.id
       }));
       setOrders(normalized);
+      if (response.data?.pagination) {
+        setPublicPagination(response.data.pagination);
+      } else {
+        setPublicPagination({
+          page: targetPage,
+          limit: 10,
+          total: response.data?.total ?? normalized.length,
+          totalPages: Math.ceil((response.data?.total ?? normalized.length) / 10) || 1
+        });
+      }
     } catch (error) {
       console.error('Error fetching public orders:', error);
     } finally {
       setLoadingPublicOrders(false);
     }
   };
+
+  // Refetch public orders whenever pagination, filters, or debounced search change
+  useEffect(() => {
+    fetchPublicOrders(publicPage);
+  }, [publicPage, sortBy, selectedCategory, selectedHostel, debouncedSearch]);
 
   // Fetch personal order history (placed & accepted)
   const fetchPersonalHistory = async () => {
@@ -75,7 +110,6 @@ export const Dashboard = () => {
   // Initialize and WebSockets Setup
   useEffect(() => {
     fetchPersonalHistory();
-    fetchPublicOrders();
 
     // Establish WebSocket Connection with authentication token
     if (accessToken) {
@@ -92,29 +126,18 @@ export const Dashboard = () => {
     // Listen for live order feeds
     socketRef.current.on('order_created', (newOrder) => {
       if (!newOrder) return;
-      const normalized = {
-        ...newOrder,
-        _id: newOrder._id || newOrder.id
-      };
-      if (!normalized._id) return;
-
-      setOrders((prev) => {
-        // Prevent duplicate orders
-        const exists = prev.some((o) => (o._id || o.id) === normalized._id);
-        if (exists) return prev;
-        return [normalized, ...prev];
-      });
+      fetchPublicOrders(publicPage);
     });
 
     socketRef.current.on('order_cancelled', ({ orderId }) => {
       if (!orderId) return;
-      setOrders((prev) => prev.filter((o) => (o._id || o.id) !== orderId));
+      fetchPublicOrders(publicPage);
       fetchPersonalHistory();
     });
 
     socketRef.current.on('order_status_change', ({ orderId, status }) => {
-      // If status changed, refresh everything
-      fetchPublicOrders();
+      // If status changed, refresh safely
+      fetchPublicOrders(publicPage);
       fetchPersonalHistory();
     });
 
@@ -299,64 +322,58 @@ export const Dashboard = () => {
     selectedHostel !== 'all' ||
     sortBy !== 'newest';
 
-  // Handler to reset all filters
+  // Handlers for discovery toolbar with automatic page reset to 1
+  const handleCategoryChange = (cat) => {
+    setSelectedCategory(cat);
+    setPublicPage(1);
+  };
+
+  const handleHostelChange = (hostel) => {
+    setSelectedHostel(hostel);
+    setPublicPage(1);
+  };
+
+  const handleSortChange = (sort) => {
+    setSortBy(sort);
+    setPublicPage(1);
+  };
+
+  const handleSearchChange = (query) => {
+    setSearchQuery(query);
+    setPublicPage(1);
+  };
+
   const handleResetFilters = () => {
     setSearchQuery('');
     setSelectedCategory('all');
     setSelectedHostel('all');
     setSortBy('newest');
+    setPublicPage(1);
   };
 
-  // Derived filtered & sorted discovery pipeline
+  const handlePublicPageChange = (newPage) => {
+    if (newPage < 1 || newPage > publicPagination.totalPages) return;
+    setPublicPage(newPage);
+  };
+
+  // Derived filtered orders (server-paginated, with client-side student-name search support)
   const filteredOrders = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
+    if (!query) return orders;
+    return orders.filter((ord) => {
+      const itemName = (ord.itemName || '').toLowerCase();
+      const pickup = (ord.pickupLocation || '').toLowerCase();
+      const drop = (ord.dropHostel || '').toLowerCase();
+      const studentName = (ord.student?.name || '').toLowerCase();
 
-    // 1. Filter
-    const filtered = orders.filter((ord) => {
-      // Search keyword filter across item, pickup, hostel, and requester name
-      if (query) {
-        const itemName = (ord.itemName || '').toLowerCase();
-        const pickup = (ord.pickupLocation || '').toLowerCase();
-        const drop = (ord.dropHostel || '').toLowerCase();
-        const studentName = (ord.student?.name || '').toLowerCase();
-
-        const matchesSearch =
-          itemName.includes(query) ||
-          pickup.includes(query) ||
-          drop.includes(query) ||
-          studentName.includes(query);
-
-        if (!matchesSearch) return false;
-      }
-
-      // Category filter
-      if (selectedCategory !== 'all') {
-        if (ord.category !== selectedCategory) return false;
-      }
-
-      // Hostel block filter
-      if (selectedHostel !== 'all') {
-        if (!matchesHostel(ord.dropHostel, selectedHostel)) return false;
-      }
-
-      return true;
+      return (
+        itemName.includes(query) ||
+        pickup.includes(query) ||
+        drop.includes(query) ||
+        studentName.includes(query)
+      );
     });
-
-    // 2. Sort on shallow copy (non-mutating)
-    return [...filtered].sort((a, b) => {
-      if (sortBy === 'reward_desc') {
-        return (b.rewardAmount || 0) - (a.rewardAmount || 0);
-      }
-      if (sortBy === 'reward_asc') {
-        return (a.rewardAmount || 0) - (b.rewardAmount || 0);
-      }
-      if (sortBy === 'oldest') {
-        return new Date(a.createdAt || 0) - new Date(b.createdAt || 0);
-      }
-      // Default: 'newest'
-      return new Date(b.createdAt || 0) - new Date(a.createdAt || 0);
-    });
-  }, [orders, searchQuery, selectedCategory, selectedHostel, sortBy]);
+  }, [orders, searchQuery]);
 
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 transition-colors duration-300 font-sans flex flex-col">
@@ -773,17 +790,17 @@ export const Dashboard = () => {
                     {/* Discovery & Filter Toolbar */}
                     <OrderDiscoveryToolbar
                       searchQuery={searchQuery}
-                      onSearchChange={setSearchQuery}
+                      onSearchChange={handleSearchChange}
                       selectedCategory={selectedCategory}
-                      onCategoryChange={setSelectedCategory}
+                      onCategoryChange={handleCategoryChange}
                       selectedHostel={selectedHostel}
-                      onHostelChange={setSelectedHostel}
+                      onHostelChange={handleHostelChange}
                       sortBy={sortBy}
-                      onSortChange={setSortBy}
+                      onSortChange={handleSortChange}
                       onResetFilters={handleResetFilters}
                       hasActiveFilters={hasActiveFilters}
-                      totalOrdersCount={orders.length}
-                      filteredOrdersCount={filteredOrders.length}
+                      totalOrdersCount={publicPagination.total}
+                      filteredOrdersCount={publicPagination.total}
                       categoryCounts={categoryCounts}
                     />
                     
@@ -877,6 +894,39 @@ export const Dashboard = () => {
                             </div>
                           </div>
                         ))}
+                      </div>
+                    )}
+
+                    {/* Public Orders Pagination Controls */}
+                    {publicPagination.totalPages > 1 && (
+                      <div className="flex items-center justify-between pt-4 border-t border-slate-200/60 dark:border-slate-800/60 text-xs text-slate-500 dark:text-slate-400">
+                        <div>
+                          Page <span className="font-bold text-slate-700 dark:text-slate-300">{publicPagination.page}</span> of{' '}
+                          <span className="font-bold text-slate-700 dark:text-slate-300">{publicPagination.totalPages}</span>
+                          <span className="ml-2 text-slate-400">({publicPagination.total} total requests)</span>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => handlePublicPageChange(publicPagination.page - 1)}
+                            disabled={publicPagination.page <= 1 || loadingPublicOrders}
+                            className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-200 font-bold disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                          >
+                            <FiChevronLeft className="w-3.5 h-3.5" />
+                            <span>Previous</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => handlePublicPageChange(publicPagination.page + 1)}
+                            disabled={publicPagination.page >= publicPagination.totalPages || loadingPublicOrders}
+                            className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-200 font-bold disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                          >
+                            <span>Next</span>
+                            <FiChevronRight className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
                       </div>
                     )}
                   </div>
